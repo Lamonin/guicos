@@ -1,0 +1,307 @@
+import { Node } from "cc";
+import { IProvideContext, IReceiveContext } from "./GuicosContext";
+import { GuicosEvent } from "./GuicosEvent";
+import { GuicosGuiFacade, IGuicosGuiFacade } from "./GuicosGuiFacade";
+import { GuicosHierarchy, ScreenHierarchyNode } from "./GuicosHierarchyRegistry";
+import { GuicosId } from "./GuicosId";
+import { IGuicosScreen } from "./GuicosScreen";
+import { GuicosView } from "./GuicosView";
+import { GuicosViewsRegistry } from "./GuicosViewsRegistry";
+
+type RuntimeScreen = IGuicosScreen & IReceiveContext<any> & IProvideContext<any> & {
+    readonly __screenId: GuicosId;
+    __bindRuntime(screenId: GuicosId, gui: IGuicosGuiFacade): void;
+    handleEvent(event: GuicosEvent): Promise<boolean>;
+};
+
+type RuntimeView = GuicosView<any> & IReceiveContext<any> & {
+    readonly __hostScreenId: GuicosId;
+    __bindRuntime(viewId: GuicosId, hostScreenId: GuicosId, gui: IGuicosGuiFacade): void;
+};
+
+export class GuicosGui {
+    private readonly _rootNode: Node;
+    private readonly _hierarchy: GuicosHierarchy;
+    private readonly _viewsRegistry: GuicosViewsRegistry;
+
+    private readonly _historyStack: RuntimeScreen[] = [];
+    private readonly _screenInstances: Map<GuicosId, RuntimeScreen> = new Map<GuicosId, RuntimeScreen>();
+    private readonly _openedViews: Map<GuicosId, RuntimeView> = new Map<GuicosId, RuntimeView>();
+    private readonly _openedViewIdsByOrder: GuicosId[] = [];
+    private _transitionDepth = 0;
+    private _transitionQueue: Promise<void> = Promise.resolve();
+
+    constructor(rootNode: Node, hierarchy: GuicosHierarchy, viewsRegistry: GuicosViewsRegistry) {
+        this._rootNode = rootNode;
+        this._hierarchy = hierarchy;
+        this._viewsRegistry = viewsRegistry;
+    }
+
+    public async start<TContext>(context: TContext): Promise<void> {
+        await this.runTransition(async () => {
+            const rootScreen = this.createScreenInstance(this._hierarchy.getScreen(this._hierarchy.rootId));
+            await rootScreen.setContext(context);
+            await this.replaceCurrentScreen(rootScreen);
+        });
+    }
+
+    public async openScreen(screenId: GuicosId, contextOverride?: any): Promise<void> {
+        // In case start not called first
+        if (this._historyStack.length === 0) {
+            if (screenId !== this._hierarchy.rootId) {
+                throw new Error(`Cannot open screen: ${screenId} without an active parent screen`);
+            }
+
+            await this.start(contextOverride);
+            return;
+        }
+
+        await this.openScreenFrom(this.getActiveScreenId(), screenId, contextOverride);
+    }
+
+    public async openScreenFrom(parentScreenId: GuicosId, screenId: GuicosId, contextOverride?: any): Promise<void> {
+        await this.runTransition(async () => {
+            const parentScreen = this.getScreenContextSource(parentScreenId);
+            const childScreen = this._hierarchy.getDirectChildScreen(parentScreenId, screenId);
+            const screenInstance = this.createScreenInstance(childScreen);
+            const childContext = contextOverride !== undefined
+                ? contextOverride
+                : await parentScreen.getExtendedContext();
+
+            await screenInstance.setContext(childContext);
+            await this.replaceCurrentScreen(screenInstance);
+        });
+    }
+
+    public async openView(viewId: GuicosId, contextOverride?: any): Promise<void> {
+        await this.openViewFrom(this.getActiveScreenId(), viewId, contextOverride);
+    }
+
+    public async openViewFrom(parentScreenId: GuicosId, viewId: GuicosId, contextOverride?: any): Promise<void> {
+        await this.runTransition(async () => {
+            const parentScreen = this.getScreenContextSource(parentScreenId);
+            const childView = this._hierarchy.getDirectChildView(parentScreenId, viewId);
+            const view = this.getOrCreateRuntimeView(childView.id, parentScreenId);
+            const childContext = contextOverride !== undefined
+                ? contextOverride
+                : await parentScreen.getExtendedContext();
+
+            await view.setContext(childContext);
+            if (this._openedViews.has(viewId)) {
+                return;
+            }
+
+            if (view.node.parent !== this._rootNode) {
+                this._rootNode.addChild(view.node);
+            }
+
+            await view.mount();
+            view.node.active = true;
+            this.attachOpenedView(viewId, view);
+            await view.show();
+        });
+    }
+
+    public async closeView(viewId: GuicosId): Promise<void> {
+        await this.closeViewFrom(this.getActiveScreenId(), viewId);
+    }
+
+    public async closeViewFrom(parentScreenId: GuicosId, viewId: GuicosId): Promise<void> {
+        await this.runTransition(async () => {
+            this._hierarchy.getDirectChildView(parentScreenId, viewId);
+
+            const view = this._openedViews.get(viewId);
+            if (view === undefined) {
+                return;
+            }
+
+            if (view.hostScreenId !== parentScreenId) {
+                throw new Error(`View with id: ${viewId} belongs to screen: ${view.hostScreenId}, not: ${parentScreenId}`);
+            }
+
+            await this.closeMountedView(viewId, view);
+        });
+    }
+
+    public async publishEventToScreen(targetScreenId: GuicosId | null, event: GuicosEvent): Promise<boolean> {
+        if (targetScreenId === null) {
+            return event.isConsumed;
+        }
+
+        const targetScreen = this._screenInstances.get(targetScreenId);
+        if (targetScreen === undefined) {
+            throw new Error(`Cannot publish event: target screen ${targetScreenId} is not instantiated`);
+        }
+
+        const isConsumed = await targetScreen.handleEvent(event);
+        if (isConsumed) {
+            return true;
+        }
+
+        const parentScreenId = this._hierarchy.getParentScreenId(targetScreenId);
+        return this.publishEventToScreen(parentScreenId, event);
+    }
+
+    private createFacade(ownerScreenId: GuicosId, eventTargetScreenId: GuicosId | null): IGuicosGuiFacade {
+        return new GuicosGuiFacade(this, ownerScreenId, eventTargetScreenId);
+    }
+
+    private getActiveScreenId(): GuicosId {
+        return this.getActiveScreen().__screenId;
+    }
+
+    private getActiveScreen(): RuntimeScreen {
+        const activeScreen = this._historyStack[this._historyStack.length - 1];
+        if (activeScreen === undefined) {
+            throw new Error("Cannot resolve parent screen: there is no active screen");
+        }
+
+        return activeScreen;
+    }
+
+    private getScreenContextSource(parentScreenId: GuicosId): RuntimeScreen {
+        const activeScreen = this.getActiveScreen();
+        if (activeScreen.__screenId !== parentScreenId) {
+            throw new Error(`Cannot open child for screen: ${parentScreenId}. Active screen is: ${activeScreen.__screenId}`);
+        }
+
+        return activeScreen;
+    }
+
+    private createScreenInstance(screenNode: ScreenHierarchyNode): RuntimeScreen {
+        const screenInstance = new screenNode.ctor() as RuntimeScreen;
+        this._screenInstances.set(screenNode.id, screenInstance);
+        screenInstance.__bindRuntime(
+            screenNode.id,
+            this.createFacade(screenNode.id, this._hierarchy.getParentScreenId(screenNode.id)),
+        );
+        return screenInstance;
+    }
+
+    private async replaceCurrentScreen(screenInstance: RuntimeScreen): Promise<void> {
+        const openedScreen = this._historyStack[this._historyStack.length - 1];
+        if (openedScreen !== undefined) {
+            await this.closeViewsForScreen(openedScreen.__screenId);
+            await openedScreen.unmount();
+            this._historyStack.pop();
+        }
+
+        this._historyStack.push(screenInstance);
+        await screenInstance.mount();
+    }
+
+    private getOrCreateRuntimeView(viewId: GuicosId, parentScreenId: GuicosId): RuntimeView {
+        const hostScreenId = this._hierarchy.getHostScreenId(viewId);
+        if (hostScreenId !== parentScreenId) {
+            throw new Error(`View with id: ${viewId} belongs to screen: ${hostScreenId}, not: ${parentScreenId}`);
+        }
+
+        const view = this._viewsRegistry.getOrCreateView(viewId) as RuntimeView;
+        view.__bindRuntime(viewId, parentScreenId, this.createFacade(parentScreenId, parentScreenId));
+        return view;
+    }
+
+    private async runTransition(operation: () => Promise<void>): Promise<void> {
+        if (this._transitionDepth > 0) {
+            await this.executeTransition(operation);
+            return;
+        }
+
+        const next = this._transitionQueue.then(() => this.executeTransition(operation));
+        this._transitionQueue = next.catch(() => { });
+        await next;
+    }
+
+    private async executeTransition(operation: () => Promise<void>): Promise<void> {
+        this._transitionDepth++;
+        try {
+            await operation();
+        } finally {
+            this._transitionDepth--;
+        }
+    }
+
+    private attachOpenedView(viewId: GuicosId, view: RuntimeView): void {
+        const insertionIndex = this.findOpenedViewInsertionIndex(viewId);
+        this._openedViews.set(viewId, view);
+        this._openedViewIdsByOrder.splice(insertionIndex, 0, viewId);
+        view.node.setSiblingIndex(insertionIndex);
+    }
+
+    private async closeViewsForScreen(screenId: GuicosId): Promise<void> {
+        const viewIdsToClose = [...this._openedViews.entries()]
+            .filter(([, view]) => view.hostScreenId === screenId)
+            .map(([viewId]) => viewId);
+
+        for (const viewId of viewIdsToClose) {
+            const view = this._openedViews.get(viewId);
+            if (view === undefined) {
+                continue;
+            }
+
+            await this.closeMountedView(viewId, view);
+        }
+    }
+
+    private async closeMountedView(viewId: GuicosId, view: RuntimeView): Promise<void> {
+        await view.hide();
+        // TODO call unmount only when view destroyed
+        await view.unmount();
+        view.node.active = false;
+        view.node.removeFromParent();
+
+        this._openedViews.delete(viewId);
+        this.detachOpenedView(viewId);
+    }
+
+    private detachOpenedView(viewId: GuicosId): void {
+        const openedViewIndex = this.findOpenedViewIndex(viewId);
+        if (openedViewIndex === -1) {
+            return;
+        }
+
+        this._openedViewIdsByOrder.splice(openedViewIndex, 1);
+    }
+
+    private findOpenedViewInsertionIndex(viewId: GuicosId): number {
+        const targetOrder = this._hierarchy.getViewOrder(viewId);
+        let left = 0;
+        let right = this._openedViewIdsByOrder.length;
+
+        while (left < right) {
+            const middle = Math.floor((left + right) / 2);
+            const currentOrder = this._hierarchy.getViewOrder(this._openedViewIdsByOrder[middle]);
+            if (currentOrder < targetOrder) {
+                left = middle + 1;
+            } else {
+                right = middle;
+            }
+        }
+
+        return left;
+    }
+
+    private findOpenedViewIndex(viewId: GuicosId): number {
+        const targetOrder = this._hierarchy.getViewOrder(viewId);
+        let left = 0;
+        let right = this._openedViewIdsByOrder.length - 1;
+
+        while (left <= right) {
+            const middle = Math.floor((left + right) / 2);
+            const currentViewId = this._openedViewIdsByOrder[middle];
+            const currentOrder = this._hierarchy.getViewOrder(currentViewId);
+
+            if (currentOrder === targetOrder) {
+                return middle;
+            }
+
+            if (currentOrder < targetOrder) {
+                left = middle + 1;
+            } else {
+                right = middle - 1;
+            }
+        }
+
+        return -1;
+    }
+}
