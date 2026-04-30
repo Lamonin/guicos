@@ -1,10 +1,13 @@
-import { instantiate, _decorator } from "cc";
+import { instantiate, isValid, _decorator } from "cc";
 import { Prefab } from "cc";
 import { GuicosId } from "./GuicosId";
 import { GuicosView } from "./GuicosView";
 import { Component } from "cc";
 import { error } from "cc";
+import { IGuicosResourceManager } from "./GuicosResourceManager";
 const { property } = _decorator;
+
+export type GuicosViewCtor<TView extends GuicosView<any> = GuicosView<any>> = new (...args: any[]) => TView;
 
 export abstract class GuicosPrefabViewRegistryData {
     @property()
@@ -25,39 +28,65 @@ export class GuicosViewsRegistry {
     private readonly prefabsRegistry: GuicosPrefabViewRegistryData[] = null;
     private readonly resourcesRegistry: GuicosResourceViewRegistryData[] = null;
 
-    constructor(prefabsRegistry: GuicosPrefabViewRegistryData[], resourcesRegistry: GuicosResourceViewRegistryData[]) {
+    constructor(
+        prefabsRegistry: GuicosPrefabViewRegistryData[],
+        resourcesRegistry: GuicosResourceViewRegistryData[],
+        private readonly resourceManager: IGuicosResourceManager = null,
+    ) {
         this.prefabsRegistry = prefabsRegistry;
         this.resourcesRegistry = resourcesRegistry;
     }
 
-    public getOrCreateView(viewId: GuicosId): GuicosView<any> {
+    public async getOrCreateView(viewId: GuicosId, viewCtor: GuicosViewCtor = null): Promise<GuicosView<any>> {
         const cachedView = this._viewsCache.get(viewId);
         if (cachedView !== undefined) {
-            return cachedView;
-        }
-
-        const prefabData = this.prefabsRegistry.find((entry) => entry.id === viewId);
-        if (prefabData === undefined) {
-            const resourceData = this.resourcesRegistry.find((entry) => entry.id === viewId);
-            if (resourceData !== undefined) {
-                throw new Error(`Loading view by resource is not implemented yet: ${viewId}`);
+            if (isValid(cachedView, true) && isValid(cachedView.node, true)) {
+                return cachedView;
             }
 
-            throw new Error(`No view registered with id: ${viewId}`);
+            this._viewsCache.delete(viewId);
         }
 
-        if (prefabData.prefab === null) {
-            throw new Error(`View prefab is not assigned for id: ${viewId}`);
+        const prefab = await this.getPrefab(viewId);
+        const view = this.createView(viewId, prefab, viewCtor);
+        this._viewsCache.set(viewId, view);
+        return view;
+    }
+
+    public async getPrefab(id: GuicosId): Promise<Prefab> {
+        const prefabData = (this.prefabsRegistry ?? []).find((entry) => entry.id === id);
+        if (prefabData === undefined) {
+            const resourceData = (this.resourcesRegistry ?? []).find((entry) => entry.id === id);
+            if (resourceData !== undefined) {
+                if (this.resourceManager === null) {
+                    throw new Error(`Resource manager is not assigned for id: ${id}`);
+                }
+
+                return await this.resourceManager.load(resourceData.path, Prefab);
+            }
+
+            throw new Error(`No prefab or resource registered with id: ${id}`);
         }
 
-        const viewNode = instantiate(prefabData.prefab);
-        const view = viewNode.getComponent(GuicosView);
+        if (prefabData.prefab == null) {
+            throw new Error(`Prefab is not assigned for id: ${id}`);
+        }
+
+        return prefabData.prefab;
+    }
+
+    private createView(viewId: GuicosId, prefab: Prefab, viewCtor: GuicosViewCtor): GuicosView<any> {
+        const viewNode = instantiate(prefab);
+        const view = viewCtor !== null
+            ? viewNode.getComponent(viewCtor)
+            : viewNode.getComponent(GuicosView);
+
         if (view === null) {
             viewNode.destroy();
-            throw new Error(`View prefab does not contain GuicosView component: ${viewId}`);
+            const componentName = viewCtor?.name ?? "GuicosView";
+            throw new Error(`View prefab must contain ${componentName} component: ${viewId}`);
         }
 
-        this._viewsCache.set(viewId, view);
         return view;
     }
 
@@ -65,7 +94,8 @@ export class GuicosViewsRegistry {
         TRegistryComponent extends GuicosViewsRegistryComponent
     >(
         registryPrefab: Prefab,
-        registryComponentType: new (...args: any[]) => TRegistryComponent
+        registryComponentType: new (...args: any[]) => TRegistryComponent,
+        resourceManager: IGuicosResourceManager = null,
     ): GuicosViewsRegistry {
         let registry = null;
 
@@ -74,7 +104,7 @@ export class GuicosViewsRegistry {
         if (registryComponent === null) {
             error("Failed to load views registry from prefab. " + registryPrefab.name);
         } else {
-            registry = registryComponent.createRegistry();
+            registry = registryComponent.createRegistry(resourceManager);
         }
 
         target.destroy();
@@ -83,5 +113,5 @@ export class GuicosViewsRegistry {
 }
 
 export abstract class GuicosViewsRegistryComponent extends Component {
-    public abstract createRegistry(): GuicosViewsRegistry;
+    public abstract createRegistry(resourceManager?: IGuicosResourceManager): GuicosViewsRegistry;
 }

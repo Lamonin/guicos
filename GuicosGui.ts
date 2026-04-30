@@ -1,4 +1,4 @@
-import { Node } from "cc";
+import { isValid, Node } from "cc";
 import { IProvideContext, IReceiveContext } from "./GuicosContext";
 import { GuicosEvent } from "./GuicosEvent";
 import { GuicosGuiFacade, IGuicosGuiFacade } from "./GuicosGuiFacade";
@@ -81,14 +81,20 @@ export class GuicosGui {
         await this.runTransition(async () => {
             const parentScreen = this.getScreenContextSource(parentScreenId);
             const childView = this._hierarchy.getDirectChildView(parentScreenId, viewId);
-            const view = this.getOrCreateRuntimeView(childView.id, parentScreenId);
+            const view = await this.getOrCreateRuntimeView(childView.id, childView.ctor, parentScreenId);
             const childContext = contextOverride !== undefined
                 ? contextOverride
                 : await parentScreen.getExtendedContext();
 
             await view.setContext(childContext);
-            if (this._openedViews.has(viewId)) {
-                return;
+            const openedView = this._openedViews.get(viewId);
+            if (openedView !== undefined) {
+                if (this.isViewMounted(openedView)) {
+                    return;
+                }
+
+                this._openedViews.delete(viewId);
+                this.detachOpenedView(viewId);
             }
 
             if (view.node.parent !== this._rootNode) {
@@ -117,6 +123,12 @@ export class GuicosGui {
 
             if (view.hostScreenId !== parentScreenId) {
                 throw new Error(`View with id: ${viewId} belongs to screen: ${view.hostScreenId}, not: ${parentScreenId}`);
+            }
+
+            if (!this.isViewMounted(view)) {
+                this._openedViews.delete(viewId);
+                this.detachOpenedView(viewId);
+                return;
             }
 
             await this.closeMountedView(viewId, view);
@@ -190,13 +202,13 @@ export class GuicosGui {
         await screenInstance.mount();
     }
 
-    private getOrCreateRuntimeView(viewId: GuicosId, parentScreenId: GuicosId): RuntimeView {
+    private async getOrCreateRuntimeView(viewId: GuicosId, viewCtor: new (...args: any[]) => GuicosView<any>, parentScreenId: GuicosId): Promise<RuntimeView> {
         const hostScreenId = this._hierarchy.getHostScreenId(viewId);
         if (hostScreenId !== parentScreenId) {
             throw new Error(`View with id: ${viewId} belongs to screen: ${hostScreenId}, not: ${parentScreenId}`);
         }
 
-        const view = this._viewsRegistry.getOrCreateView(viewId) as RuntimeView;
+        const view = await this._viewsRegistry.getOrCreateView(viewId, viewCtor) as RuntimeView;
         view.__bindRuntime(viewId, parentScreenId, this.createFacade(parentScreenId, parentScreenId));
         return view;
     }
@@ -244,14 +256,38 @@ export class GuicosGui {
     }
 
     private async closeMountedView(viewId: GuicosId, view: RuntimeView): Promise<void> {
-        await view.hide();
-        // TODO call unmount only when view destroyed
-        await view.unmount();
-        view.node.active = false;
-        view.node.removeFromParent();
+        try {
+            if (!this.isViewAlive(view)) {
+                return;
+            }
 
-        this._openedViews.delete(viewId);
-        this.detachOpenedView(viewId);
+            await view.hide();
+
+            if (!this.isViewAlive(view)) {
+                return;
+            }
+
+            // TODO call unmount only when view destroyed
+            await view.unmount();
+
+            if (!this.isViewAlive(view)) {
+                return;
+            }
+
+            view.node.active = false;
+            view.node.removeFromParent();
+        } finally {
+            this._openedViews.delete(viewId);
+            this.detachOpenedView(viewId);
+        }
+    }
+
+    private isViewAlive(view: RuntimeView): boolean {
+        return isValid(view, true) && isValid(view.node, true);
+    }
+
+    private isViewMounted(view: RuntimeView): boolean {
+        return this.isViewAlive(view) && view.node.parent === this._rootNode;
     }
 
     private detachOpenedView(viewId: GuicosId): void {
