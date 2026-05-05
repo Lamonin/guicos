@@ -1,8 +1,10 @@
 import { GuicosGui } from "./GuicosGui";
 import { GuicosEvent } from "./GuicosEvent";
 import { GuicosId } from "./GuicosId";
+import { GuicosWidgetsRegistry } from "./GuicosWidgetsRegistry";
 
 export interface IGuicosGuiFacade {
+    readonly widgets: GuicosWidgetsRegistry;
     openScreen<TContext>(screenId: GuicosId, contextOverride?: TContext): Promise<void>;
     openView<TContext>(viewId: GuicosId, contextOverride?: TContext): Promise<void>;
     closeView(viewId: GuicosId): Promise<void>;
@@ -14,7 +16,12 @@ export class GuicosGuiFacade implements IGuicosGuiFacade {
         private readonly runtime: GuicosGui,
         private readonly ownerScreenId: GuicosId,
         private readonly eventTargetScreenId: GuicosId | null,
+        private readonly widgetsRegistry: GuicosWidgetsRegistry,
     ) { }
+
+    public get widgets(): GuicosWidgetsRegistry {
+        return this.widgetsRegistry;
+    }
 
     public async openScreen<TContext>(screenId: GuicosId, contextOverride?: TContext): Promise<void> {
         await this.runtime.openScreenFrom(this.ownerScreenId, screenId, contextOverride);

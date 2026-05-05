@@ -7,6 +7,7 @@ import { GuicosId } from "./GuicosId";
 import { IGuicosScreen } from "./GuicosScreen";
 import { GuicosView } from "./GuicosView";
 import { GuicosViewsRegistry } from "./GuicosViewsRegistry";
+import { GuicosWidgetsRegistry } from "./GuicosWidgetsRegistry";
 
 type RuntimeScreen = IGuicosScreen & IReceiveContext<any> & IProvideContext<any> & {
     readonly __screenId: GuicosId;
@@ -23,6 +24,7 @@ export class GuicosGui {
     private readonly _rootNode: Node;
     private readonly _hierarchy: GuicosHierarchy;
     private readonly _viewsRegistry: GuicosViewsRegistry;
+    private readonly _widgetsRegistry: GuicosWidgetsRegistry;
 
     private readonly _historyStack: RuntimeScreen[] = [];
     private readonly _screenInstances: Map<GuicosId, RuntimeScreen> = new Map<GuicosId, RuntimeScreen>();
@@ -31,10 +33,16 @@ export class GuicosGui {
     private _transitionDepth = 0;
     private _transitionQueue: Promise<void> = Promise.resolve();
 
-    constructor(rootNode: Node, hierarchy: GuicosHierarchy, viewsRegistry: GuicosViewsRegistry) {
+    constructor(
+        rootNode: Node,
+        hierarchy: GuicosHierarchy,
+        viewsRegistry: GuicosViewsRegistry,
+        widgetsRegistry: GuicosWidgetsRegistry,
+    ) {
         this._rootNode = rootNode;
         this._hierarchy = hierarchy;
         this._viewsRegistry = viewsRegistry;
+        this._widgetsRegistry = widgetsRegistry;
     }
 
     public async start<TContext>(context: TContext): Promise<void> {
@@ -155,7 +163,7 @@ export class GuicosGui {
     }
 
     private createFacade(ownerScreenId: GuicosId, eventTargetScreenId: GuicosId | null): IGuicosGuiFacade {
-        return new GuicosGuiFacade(this, ownerScreenId, eventTargetScreenId);
+        return new GuicosGuiFacade(this, ownerScreenId, eventTargetScreenId, this._widgetsRegistry);
     }
 
     private getActiveScreenId(): GuicosId {
