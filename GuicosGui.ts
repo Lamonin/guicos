@@ -13,6 +13,7 @@ type RuntimeScreen = IGuicosScreen & IReceiveContext<any> & IProvideContext<any>
     readonly __screenId: GuicosId;
     __bindRuntime(screenId: GuicosId, gui: IGuicosGuiFacade): void;
     handleEvent(event: GuicosEvent): Promise<boolean>;
+    __clearEventSubscriptions(): void;
 };
 
 type RuntimeView = GuicosView<any> & IReceiveContext<any> & {
@@ -260,6 +261,7 @@ export class GuicosGui {
 
         await this.closeViewsForScreen(screenId);
         await screen.unmount();
+        screen.__clearEventSubscriptions();
         this._screenInstances.delete(screenId);
 
         const stackIndex = this._historyStack.findIndex(s => s.__screenId === screenId);

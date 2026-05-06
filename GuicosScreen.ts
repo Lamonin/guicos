@@ -1,5 +1,13 @@
 import { IProvideContext, IReceiveContext, MaybePromise } from "./GuicosContext";
 import { GuicosEvent } from "./GuicosEvent";
+import {
+    GUICOS_NOOP_EVENT_SUBSCRIPTION,
+    GuicosEventCallback,
+    GuicosEventCtor,
+    GuicosEventSubscription,
+    GuicosEventSubscriptionOptions,
+    IGuicosEventSubscription,
+} from "./GuicosEventSubscription";
 import { IGuicosGuiFacade } from "./GuicosGuiFacade";
 import { GuicosId } from "./GuicosId";
 
@@ -9,11 +17,13 @@ export interface IGuicosScreen {
     mount(): MaybePromise<void>;
     unmount(): MaybePromise<void>;
     handleEvent(event: GuicosEvent): MaybePromise<boolean>;
+    __clearEventSubscriptions(): void;
 }
 
 export abstract class GuicosScreen<TContext, TExtendedContext extends TContext> implements IGuicosScreen, IReceiveContext<TContext>, IProvideContext<TExtendedContext> {
     public __gui!: IGuicosGuiFacade;
     private _screenId!: GuicosId;
+    private readonly _eventSubscriptions = new Map<GuicosEventCtor<GuicosEvent>, GuicosEventSubscription<GuicosEvent>>();
 
     public get gui(): IGuicosGuiFacade {
         return this.__gui;
@@ -45,11 +55,65 @@ export abstract class GuicosScreen<TContext, TExtendedContext extends TContext> 
     }
 
     public async handleEvent(event: GuicosEvent): Promise<boolean> {
-        await this.onEvent(event);
+        await this.dispatchSubscribedEvent(event);
+
+        if (!event.isConsumed) {
+            await this.onEvent(event);
+        }
+
         return event.isConsumed;
+    }
+
+    public __clearEventSubscriptions(): void {
+        for (const subscription of this._eventSubscriptions.values()) {
+            subscription.deactivate();
+        }
+
+        this._eventSubscriptions.clear();
+    }
+
+    protected subscribeEvent<TEvent extends GuicosEvent>(
+        eventCtor: GuicosEventCtor<TEvent>,
+        callback: GuicosEventCallback<TEvent>,
+        thisArg?: unknown,
+        options?: GuicosEventSubscriptionOptions,
+    ): IGuicosEventSubscription {
+        if (this._eventSubscriptions.has(eventCtor as GuicosEventCtor<GuicosEvent>)) {
+            console.warn(`[GuicosScreen] Duplicate subscription for event: ${eventCtor.name}. Screen: ${this._screenId ?? this.constructor.name}.`);
+            return GUICOS_NOOP_EVENT_SUBSCRIPTION;
+        }
+
+        const subscription = new GuicosEventSubscription(
+            eventCtor,
+            callback,
+            thisArg,
+            options?.autoConsume ?? true,
+            this.unsubscribeEvent.bind(this),
+        ) as GuicosEventSubscription<GuicosEvent>;
+
+        this._eventSubscriptions.set(eventCtor as GuicosEventCtor<GuicosEvent>, subscription);
+        return subscription;
     }
 
     protected onEvent(event: GuicosEvent): MaybePromise<void> { }
     public mount(): MaybePromise<void> { }
     public unmount(): MaybePromise<void> { }
+
+    private async dispatchSubscribedEvent(event: GuicosEvent): Promise<void> {
+        for (const subscription of this._eventSubscriptions.values()) {
+            const matched = await subscription.dispatch(event);
+            if (matched) {
+                return;
+            }
+        }
+    }
+
+    private unsubscribeEvent(subscription: GuicosEventSubscription<GuicosEvent>): void {
+        const current = this._eventSubscriptions.get(subscription.eventCtor);
+        if (current !== subscription) {
+            return;
+        }
+
+        this._eventSubscriptions.delete(subscription.eventCtor);
+    }
 }

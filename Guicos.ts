@@ -1,5 +1,6 @@
 export * from "./GuicosId";
 export * from "./GuicosEvent";
+export * from "./GuicosEventSubscription";
 export * from "./GuicosGuiFacade";
 export * from "./GuicosScreen";
 export * from "./GuicosView";
