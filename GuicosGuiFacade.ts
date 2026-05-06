@@ -6,6 +6,7 @@ import { GuicosWidgetsRegistry } from "./GuicosWidgetsRegistry";
 export interface IGuicosGuiFacade {
     readonly widgets: GuicosWidgetsRegistry;
     openScreen<TContext>(screenId: GuicosId, contextOverride?: TContext): Promise<void>;
+    closeScreen(screenId: GuicosId): Promise<void>;
     openView<TContext>(viewId: GuicosId, contextOverride?: TContext): Promise<void>;
     closeView(viewId: GuicosId): Promise<void>;
     publishEvent<TEvent extends GuicosEvent>(event: TEvent): Promise<boolean>;
@@ -25,6 +26,10 @@ export class GuicosGuiFacade implements IGuicosGuiFacade {
 
     public async openScreen<TContext>(screenId: GuicosId, contextOverride?: TContext): Promise<void> {
         await this.runtime.openScreenFrom(this.ownerScreenId, screenId, contextOverride);
+    }
+
+    public async closeScreen(screenId: GuicosId): Promise<void> {
+        await this.runtime.closeScreenFrom(this.ownerScreenId, screenId);
     }
 
     public async openView<TContext>(viewId: GuicosId, contextOverride?: TContext): Promise<void> {

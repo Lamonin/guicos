@@ -1,7 +1,7 @@
-import { GuicosEvent } from "./GuicosEvent";
-import { GuicosId } from "./GuicosId";
 import { IProvideContext, IReceiveContext, MaybePromise } from "./GuicosContext";
+import { GuicosEvent } from "./GuicosEvent";
 import { IGuicosGuiFacade } from "./GuicosGuiFacade";
+import { GuicosId } from "./GuicosId";
 
 export interface IGuicosScreen {
     set __gui(gui: IGuicosGuiFacade);
@@ -49,7 +49,7 @@ export abstract class GuicosScreen<TContext, TExtendedContext extends TContext> 
         return event.isConsumed;
     }
 
-    protected onEvent(_event: GuicosEvent): MaybePromise<void> { }
+    protected onEvent(event: GuicosEvent): MaybePromise<void> { }
     public mount(): MaybePromise<void> { }
     public unmount(): MaybePromise<void> { }
 }

@@ -49,7 +49,8 @@ export class GuicosGui {
         await this.runTransition(async () => {
             const rootScreen = this.createScreenInstance(this._hierarchy.getScreen(this._hierarchy.rootId));
             await rootScreen.setContext(context);
-            await this.replaceCurrentScreen(rootScreen);
+            this._historyStack.push(rootScreen);
+            await rootScreen.mount();
         });
     }
 
@@ -71,13 +72,41 @@ export class GuicosGui {
         await this.runTransition(async () => {
             const parentScreen = this.getScreenContextSource(parentScreenId);
             const childScreen = this._hierarchy.getDirectChildScreen(parentScreenId, screenId);
-            const screenInstance = this.createScreenInstance(childScreen);
             const childContext = contextOverride !== undefined
                 ? contextOverride
                 : await parentScreen.getExtendedContext();
 
+            await this.closeSameLayerSiblingScreens(screenId);
+
+            const openedScreen = this._screenInstances.get(screenId);
+            if (openedScreen !== undefined) {
+                await openedScreen.setContext(childContext);
+                return;
+            }
+
+            const screenInstance = this.createScreenInstance(childScreen);
             await screenInstance.setContext(childContext);
-            await this.replaceCurrentScreen(screenInstance);
+            this._historyStack.push(screenInstance);
+            await screenInstance.mount();
+        });
+    }
+
+    public async closeScreen(screenId: GuicosId): Promise<void> {
+        await this.closeScreenFrom(this.getActiveScreenId(), screenId);
+    }
+
+    public async closeScreenFrom(parentScreenId: GuicosId, screenId: GuicosId): Promise<void> {
+        await this.runTransition(async () => {
+            const actualParentScreenId = this._hierarchy.getParentScreenId(screenId);
+            if (actualParentScreenId !== parentScreenId) {
+                throw new Error(`Cannot close screen ${screenId} from ${parentScreenId}: screen belongs to ${actualParentScreenId}`);
+            }
+
+            if (!this._screenInstances.has(screenId)) {
+                throw new Error(`Cannot close screen ${screenId}: screen not instantiated`);
+            }
+
+            await this.closeScreenBranch(screenId);
         });
     }
 
@@ -180,12 +209,12 @@ export class GuicosGui {
     }
 
     private getScreenContextSource(parentScreenId: GuicosId): RuntimeScreen {
-        const activeScreen = this.getActiveScreen();
-        if (activeScreen.__screenId !== parentScreenId) {
-            throw new Error(`Cannot open child for screen: ${parentScreenId}. Active screen is: ${activeScreen.__screenId}`);
+        const parentScreen = this._screenInstances.get(parentScreenId);
+        if (parentScreen === undefined) {
+            throw new Error(`Cannot resolve parent screen: ${parentScreenId} is not opened`);
         }
 
-        return activeScreen;
+        return parentScreen;
     }
 
     private createScreenInstance(screenNode: ScreenHierarchyNode): RuntimeScreen {
@@ -198,16 +227,45 @@ export class GuicosGui {
         return screenInstance;
     }
 
-    private async replaceCurrentScreen(screenInstance: RuntimeScreen): Promise<void> {
-        const openedScreen = this._historyStack[this._historyStack.length - 1];
-        if (openedScreen !== undefined) {
-            await this.closeViewsForScreen(openedScreen.__screenId);
-            await openedScreen.unmount();
-            this._historyStack.pop();
+    private async closeSameLayerSiblingScreens(screenId: GuicosId): Promise<void> {
+        const siblingScreenIds = this._hierarchy.getSameLayerSiblingScreenIds(screenId);
+        for (const siblingScreenId of siblingScreenIds) {
+            if (!this._screenInstances.has(siblingScreenId)) {
+                continue;
+            }
+
+            await this.closeScreenBranch(siblingScreenId);
+        }
+    }
+
+    private async closeScreenBranch(screenId: GuicosId): Promise<void> {
+        const screenIdsToClose = this._historyStack
+            .map(screen => screen.__screenId)
+            .filter(openedScreenId =>
+                openedScreenId === screenId
+                || this._hierarchy.isScreenDescendantOf(openedScreenId, screenId)
+            )
+            .reverse();
+
+        for (const openedScreenId of screenIdsToClose) {
+            await this.closeScreenInstance(openedScreenId);
+        }
+    }
+
+    private async closeScreenInstance(screenId: GuicosId): Promise<void> {
+        const screen = this._screenInstances.get(screenId);
+        if (screen === undefined) {
+            return;
         }
 
-        this._historyStack.push(screenInstance);
-        await screenInstance.mount();
+        await this.closeViewsForScreen(screenId);
+        await screen.unmount();
+        this._screenInstances.delete(screenId);
+
+        const stackIndex = this._historyStack.findIndex(s => s.__screenId === screenId);
+        if (stackIndex !== -1) {
+            this._historyStack.splice(stackIndex, 1);
+        }
     }
 
     private async getOrCreateRuntimeView(viewId: GuicosId, viewCtor: new (...args: any[]) => GuicosView<any>, parentScreenId: GuicosId): Promise<RuntimeView> {

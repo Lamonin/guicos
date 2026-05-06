@@ -133,6 +133,8 @@ export class GuicosHierarchy {
     private _lookup!: Map<GuicosId, ScreenHierarchyNode | ViewHierarchyNode>;
     private _screenChildren!: Map<GuicosId, Map<GuicosId, ScreenHierarchyNode | ViewHierarchyNode>>;
     private _screenParents!: Map<GuicosId, GuicosId>;
+    private _screenLayers!: Map<GuicosId, GuicosId>;
+    private _screenIdsByParentLayer!: Map<GuicosId, Map<GuicosId, GuicosId[]>>;
     private _viewHostScreens!: Map<GuicosId, GuicosId>;
     private _viewOrder!: Map<GuicosId, number>;
 
@@ -152,6 +154,8 @@ export class GuicosHierarchy {
         this._lookup = new Map<GuicosId, ScreenHierarchyNode | ViewHierarchyNode>();
         this._screenChildren = new Map<GuicosId, Map<GuicosId, ScreenHierarchyNode | ViewHierarchyNode>>();
         this._screenParents = new Map<GuicosId, GuicosId>();
+        this._screenLayers = new Map<GuicosId, GuicosId>();
+        this._screenIdsByParentLayer = new Map<GuicosId, Map<GuicosId, GuicosId[]>>();
         this._viewHostScreens = new Map<GuicosId, GuicosId>();
         this._viewOrder = new Map<GuicosId, number>();
         let nextViewOrder = 0;
@@ -160,6 +164,7 @@ export class GuicosHierarchy {
             node: ScreenHierarchyNode | ViewHierarchyNode,
             parentScreenId?: GuicosId,
             hostScreenId?: GuicosId,
+            layerId?: GuicosId,
         ) => {
             if (this._lookup.has(node.id)) {
                 throw new Error(`Duplicate hierarchy node id: ${node.id}`);
@@ -169,6 +174,27 @@ export class GuicosHierarchy {
 
             if (parentScreenId !== undefined) {
                 this._screenParents.set(node.id, parentScreenId);
+
+                if (node.type === "screen") {
+                    if (layerId === undefined) {
+                        throw new Error(`No layer id for screen: ${node.id}`);
+                    }
+
+                    this._screenLayers.set(node.id, layerId);
+                    let screenIdsByLayer = this._screenIdsByParentLayer.get(parentScreenId);
+                    if (screenIdsByLayer === undefined) {
+                        screenIdsByLayer = new Map<GuicosId, GuicosId[]>();
+                        this._screenIdsByParentLayer.set(parentScreenId, screenIdsByLayer);
+                    }
+
+                    let screenIds = screenIdsByLayer.get(layerId);
+                    if (screenIds === undefined) {
+                        screenIds = [];
+                        screenIdsByLayer.set(layerId, screenIds);
+                    }
+
+                    screenIds.push(node.id);
+                }
             }
 
             if (hostScreenId !== undefined) {
@@ -194,7 +220,7 @@ export class GuicosHierarchy {
                     if (child.type === "view") {
                         registerNode(child, undefined, node.id);
                     } else {
-                        registerNode(child, node.id);
+                        registerNode(child, node.id, undefined, layer.id);
                     }
                 }
             }
@@ -268,6 +294,41 @@ export class GuicosHierarchy {
         }
 
         return parentScreenId;
+    }
+
+    public getSameLayerSiblingScreenIds(screenId: GuicosId): GuicosId[] {
+        this.getScreen(screenId);
+
+        const parentScreenId = this.getParentScreenId(screenId);
+        if (parentScreenId === null) {
+            return [];
+        }
+
+        const layerId = this._screenLayers.get(screenId);
+        if (layerId === undefined) {
+            throw new Error(`No layer for screen id: ${screenId}`);
+        }
+
+        const screenIdsByLayer = this._screenIdsByParentLayer.get(parentScreenId);
+        const screenIds = screenIdsByLayer?.get(layerId) ?? [];
+
+        return screenIds.filter(siblingScreenId => siblingScreenId !== screenId);
+    }
+
+    public isScreenDescendantOf(screenId: GuicosId, ancestorScreenId: GuicosId): boolean {
+        this.getScreen(screenId);
+        this.getScreen(ancestorScreenId);
+
+        let parentScreenId = this.getParentScreenId(screenId);
+        while (parentScreenId !== null) {
+            if (parentScreenId === ancestorScreenId) {
+                return true;
+            }
+
+            parentScreenId = this.getParentScreenId(parentScreenId);
+        }
+
+        return false;
     }
 
     public getViewOrder(viewId: GuicosId): number {
