@@ -136,6 +136,8 @@ export class GuicosHierarchy {
     private _screenLayers!: Map<GuicosId, GuicosId>;
     private _screenIdsByParentLayer!: Map<GuicosId, Map<GuicosId, GuicosId[]>>;
     private _viewHostScreens!: Map<GuicosId, GuicosId>;
+    private _viewLayers!: Map<GuicosId, GuicosId>;
+    private _viewIdsByHostLayer!: Map<GuicosId, Map<GuicosId, GuicosId[]>>;
     private _viewOrder!: Map<GuicosId, number>;
 
     /**
@@ -157,6 +159,8 @@ export class GuicosHierarchy {
         this._screenLayers = new Map<GuicosId, GuicosId>();
         this._screenIdsByParentLayer = new Map<GuicosId, Map<GuicosId, GuicosId[]>>();
         this._viewHostScreens = new Map<GuicosId, GuicosId>();
+        this._viewLayers = new Map<GuicosId, GuicosId>();
+        this._viewIdsByHostLayer = new Map<GuicosId, Map<GuicosId, GuicosId[]>>();
         this._viewOrder = new Map<GuicosId, number>();
         let nextViewOrder = 0;
 
@@ -200,6 +204,27 @@ export class GuicosHierarchy {
             if (hostScreenId !== undefined) {
                 this._viewHostScreens.set(node.id, hostScreenId);
                 this._viewOrder.set(node.id, nextViewOrder++);
+
+                if (node.type === "view") {
+                    if (layerId === undefined) {
+                        throw new Error(`No layer id for view: ${node.id}`);
+                    }
+
+                    this._viewLayers.set(node.id, layerId);
+                    let viewIdsByLayer = this._viewIdsByHostLayer.get(hostScreenId);
+                    if (viewIdsByLayer === undefined) {
+                        viewIdsByLayer = new Map<GuicosId, GuicosId[]>();
+                        this._viewIdsByHostLayer.set(hostScreenId, viewIdsByLayer);
+                    }
+
+                    let viewIds = viewIdsByLayer.get(layerId);
+                    if (viewIds === undefined) {
+                        viewIds = [];
+                        viewIdsByLayer.set(layerId, viewIds);
+                    }
+
+                    viewIds.push(node.id);
+                }
             }
 
             if (node.type !== "screen") {
@@ -218,7 +243,7 @@ export class GuicosHierarchy {
                     screenChildren.set(child.id, child);
 
                     if (child.type === "view") {
-                        registerNode(child, undefined, node.id);
+                        registerNode(child, undefined, node.id, layer.id);
                     } else {
                         registerNode(child, node.id, undefined, layer.id);
                     }
@@ -313,6 +338,28 @@ export class GuicosHierarchy {
         const screenIds = screenIdsByLayer?.get(layerId) ?? [];
 
         return screenIds.filter(siblingScreenId => siblingScreenId !== screenId);
+    }
+
+    public getSameLayerSiblingViewIds(viewId: GuicosId): GuicosId[] {
+        const node = this._lookup.get(viewId);
+        if (node === undefined) {
+            throw new Error(`No view with id: ${viewId} in hierarchy`);
+        }
+
+        if (node.type !== "view") {
+            throw new Error(`Node with id in hierarchy: ${viewId} is ${node.type} not a view`);
+        }
+
+        const hostScreenId = this.getHostScreenId(viewId);
+        const layerId = this._viewLayers.get(viewId);
+        if (layerId === undefined) {
+            throw new Error(`No layer for view id: ${viewId}`);
+        }
+
+        const viewIdsByLayer = this._viewIdsByHostLayer.get(hostScreenId);
+        const viewIds = viewIdsByLayer?.get(layerId) ?? [];
+
+        return viewIds.filter(siblingViewId => siblingViewId !== viewId);
     }
 
     public isScreenDescendantOf(screenId: GuicosId, ancestorScreenId: GuicosId): boolean {

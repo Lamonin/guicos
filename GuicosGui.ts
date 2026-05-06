@@ -143,6 +143,7 @@ export class GuicosGui {
             view.node.active = true;
             this.attachOpenedView(viewId, view);
             await view.show();
+            await this.closeSameLayerSiblingViews(viewId);
         });
     }
 
@@ -236,6 +237,18 @@ export class GuicosGui {
             }
 
             await this.closeScreenBranch(siblingScreenId);
+        }
+    }
+
+    private async closeSameLayerSiblingViews(viewId: GuicosId): Promise<void> {
+        const siblingViewIds = this._hierarchy.getSameLayerSiblingViewIds(viewId);
+        for (const siblingViewId of siblingViewIds) {
+            const siblingView = this._openedViews.get(siblingViewId);
+            if (siblingView === undefined) {
+                continue;
+            }
+
+            await this.closeMountedView(siblingViewId, siblingView);
         }
     }
 
