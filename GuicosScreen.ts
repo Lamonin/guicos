@@ -5,10 +5,9 @@ import {
     GuicosEventCallback,
     GuicosEventCtor,
     GuicosEventSubscription,
-    GuicosEventSubscriptionOptions,
     IGuicosEventSubscription,
 } from "./GuicosEventSubscription";
-import { IGuicosGuiFacade } from "./GuicosGuiFacade";
+import type { IGuicosGuiFacade } from "./GuicosGuiFacade";
 import { GuicosId } from "./GuicosId";
 
 export interface IGuicosScreen {
@@ -58,7 +57,7 @@ export abstract class GuicosScreen<TContext, TExtendedContext extends TContext> 
         await this.dispatchSubscribedEvent(event);
 
         if (!event.isConsumed) {
-            await this.onEvent(event);
+            await this.onUnhandledEvent(event);
         }
 
         return event.isConsumed;
@@ -72,11 +71,28 @@ export abstract class GuicosScreen<TContext, TExtendedContext extends TContext> 
         this._eventSubscriptions.clear();
     }
 
-    protected subscribeEvent<TEvent extends GuicosEvent>(
+    protected onEvent<TEvent extends GuicosEvent>(
         eventCtor: GuicosEventCtor<TEvent>,
         callback: GuicosEventCallback<TEvent>,
-        thisArg?: unknown,
-        options?: GuicosEventSubscriptionOptions,
+    ): IGuicosEventSubscription {
+        return this.subscribeEvent(eventCtor, callback, true);
+    }
+
+    protected onEventPassThrough<TEvent extends GuicosEvent>(
+        eventCtor: GuicosEventCtor<TEvent>,
+        callback: GuicosEventCallback<TEvent>,
+    ): IGuicosEventSubscription {
+        return this.subscribeEvent(eventCtor, callback, false);
+    }
+
+    protected onUnhandledEvent(event: GuicosEvent): MaybePromise<void> { }
+    public mount(): MaybePromise<void> { }
+    public unmount(): MaybePromise<void> { }
+
+    private subscribeEvent<TEvent extends GuicosEvent>(
+        eventCtor: GuicosEventCtor<TEvent>,
+        callback: GuicosEventCallback<TEvent>,
+        autoConsume: boolean,
     ): IGuicosEventSubscription {
         if (this._eventSubscriptions.has(eventCtor as GuicosEventCtor<GuicosEvent>)) {
             console.warn(`[GuicosScreen] Duplicate subscription for event: ${eventCtor.name}. Screen: ${this._screenId ?? this.constructor.name}.`);
@@ -85,19 +101,14 @@ export abstract class GuicosScreen<TContext, TExtendedContext extends TContext> 
 
         const subscription = new GuicosEventSubscription(
             eventCtor,
-            callback,
-            thisArg,
-            options?.autoConsume ?? true,
+            callback.bind(this) as GuicosEventCallback<TEvent>,
+            autoConsume,
             this.unsubscribeEvent.bind(this),
         ) as GuicosEventSubscription<GuicosEvent>;
 
         this._eventSubscriptions.set(eventCtor as GuicosEventCtor<GuicosEvent>, subscription);
         return subscription;
     }
-
-    protected onEvent(event: GuicosEvent): MaybePromise<void> { }
-    public mount(): MaybePromise<void> { }
-    public unmount(): MaybePromise<void> { }
 
     private async dispatchSubscribedEvent(event: GuicosEvent): Promise<void> {
         for (const subscription of this._eventSubscriptions.values()) {

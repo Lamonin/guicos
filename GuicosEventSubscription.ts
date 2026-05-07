@@ -3,10 +3,6 @@ import { GuicosEvent } from "./GuicosEvent";
 
 export type GuicosEventCtor<TEvent extends GuicosEvent> = new (...args: any[]) => TEvent;
 
-export type GuicosEventSubscriptionOptions = {
-    autoConsume?: boolean;
-};
-
 export interface IGuicosEventSubscription {
     readonly isActive: boolean;
     unsubscribe(): void;
@@ -20,7 +16,6 @@ export class GuicosEventSubscription<TEvent extends GuicosEvent> implements IGui
     public constructor(
         public readonly eventCtor: GuicosEventCtor<TEvent>,
         private readonly callback: GuicosEventCallback<TEvent>,
-        private readonly thisArg: unknown,
         public readonly autoConsume: boolean,
         private readonly unsubscribeSelf: (subscription: GuicosEventSubscription<TEvent>) => void,
     ) { }
@@ -38,7 +33,7 @@ export class GuicosEventSubscription<TEvent extends GuicosEvent> implements IGui
             event.consume();
         }
 
-        await this.callback.call(this.thisArg, event);
+        await this.callback(event);
         return true;
     }
 
