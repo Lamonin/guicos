@@ -1,4 +1,5 @@
-import { Component, Prefab, instantiate, isValid, error, _decorator } from "cc";
+import { Component, Prefab, instantiate, isValid, _decorator } from "cc";
+import { GUICOS_NOOP_LOGGER, IGuicosLogger } from "./GuicosLogger";
 import { IGuicosResourceManager } from "./GuicosResourceManager";
 
 const { property, ccclass } = _decorator;
@@ -27,6 +28,7 @@ export class GuicosWidgetsRegistry {
         prefabsRegistry: GuicosWidgetRegistryData[],
         resourcesRegistry: GuicosWidgetResourceData[],
         resourceManager: IGuicosResourceManager | null = null,
+        private readonly logger: IGuicosLogger = GUICOS_NOOP_LOGGER,
     ) {
         this.prefabsRegistry = prefabsRegistry;
         this.resourcesRegistry = resourcesRegistry;
@@ -67,16 +69,17 @@ export class GuicosWidgetsRegistry {
     public static loadFromPrefab(
         registryPrefab: Prefab,
         resourceManager: IGuicosResourceManager | null = null,
+        logger: IGuicosLogger = GUICOS_NOOP_LOGGER,
     ): GuicosWidgetsRegistry {
         const target = instantiate(registryPrefab);
         const registryComponent = target.getComponent(GuicosWidgetsRegistryComponent);
         if (registryComponent === null) {
-            error("Failed to load widgets registry from prefab. " + registryPrefab.name);
+            logger.error("Failed to load widgets registry from prefab. " + registryPrefab.name);
             target.destroy();
             return null;
         }
 
-        const registry = registryComponent.createRegistry(resourceManager);
+        const registry = registryComponent.createRegistry(resourceManager, logger);
         target.destroy();
         return registry;
     }
@@ -84,5 +87,5 @@ export class GuicosWidgetsRegistry {
 
 @ccclass("GuicosWidgetsRegistryComponent")
 export abstract class GuicosWidgetsRegistryComponent extends Component {
-    public abstract createRegistry(resourceManager?: IGuicosResourceManager): GuicosWidgetsRegistry;
+    public abstract createRegistry(resourceManager?: IGuicosResourceManager, logger?: IGuicosLogger): GuicosWidgetsRegistry;
 }

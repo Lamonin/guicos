@@ -3,8 +3,8 @@ import { Prefab } from "cc";
 import { GuicosId } from "./GuicosId";
 import { GuicosView } from "./GuicosView";
 import { Component } from "cc";
-import { error } from "cc";
 import { IGuicosResourceManager } from "./GuicosResourceManager";
+import { GUICOS_NOOP_LOGGER, IGuicosLogger } from "./GuicosLogger";
 const { property } = _decorator;
 
 export type GuicosViewCtor<TView extends GuicosView<any> = GuicosView<any>> = new (...args: any[]) => TView;
@@ -32,6 +32,7 @@ export class GuicosViewsRegistry {
         prefabsRegistry: GuicosPrefabViewRegistryData[],
         resourcesRegistry: GuicosResourceViewRegistryData[],
         private readonly resourceManager: IGuicosResourceManager = null,
+        private readonly logger: IGuicosLogger = GUICOS_NOOP_LOGGER,
     ) {
         this.prefabsRegistry = prefabsRegistry;
         this.resourcesRegistry = resourcesRegistry;
@@ -62,7 +63,10 @@ export class GuicosViewsRegistry {
                     throw new Error(`Resource manager is not assigned for id: ${id}`);
                 }
 
-                return await this.resourceManager.load(resourceData.path, Prefab);
+                this.logger.log(`[GuicosViewsRegistry] Loading resource view prefab. id: ${id}, path: ${resourceData.path}`);
+                const prefab = await this.resourceManager.load(resourceData.path, Prefab);
+                this.logger.log(`[GuicosViewsRegistry] Loaded resource view prefab. id: ${id}, path: ${resourceData.path}`);
+                return prefab;
             }
 
             throw new Error(`No prefab or resource registered with id: ${id}`);
@@ -96,15 +100,16 @@ export class GuicosViewsRegistry {
         registryPrefab: Prefab,
         registryComponentType: new (...args: any[]) => TRegistryComponent,
         resourceManager: IGuicosResourceManager = null,
+        logger: IGuicosLogger = GUICOS_NOOP_LOGGER,
     ): GuicosViewsRegistry {
         let registry = null;
 
         const target = instantiate(registryPrefab);
         const registryComponent = target.getComponent(registryComponentType);
         if (registryComponent === null) {
-            error("Failed to load views registry from prefab. " + registryPrefab.name);
+            logger.error("Failed to load views registry from prefab. " + registryPrefab.name);
         } else {
-            registry = registryComponent.createRegistry(resourceManager);
+            registry = registryComponent.createRegistry(resourceManager, logger);
         }
 
         target.destroy();
@@ -113,5 +118,5 @@ export class GuicosViewsRegistry {
 }
 
 export abstract class GuicosViewsRegistryComponent extends Component {
-    public abstract createRegistry(resourceManager?: IGuicosResourceManager): GuicosViewsRegistry;
+    public abstract createRegistry(resourceManager?: IGuicosResourceManager, logger?: IGuicosLogger): GuicosViewsRegistry;
 }

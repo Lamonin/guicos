@@ -1,10 +1,12 @@
 import { GuicosGui } from "./GuicosGui";
 import { GuicosEvent } from "./GuicosEvent";
 import { GuicosId } from "./GuicosId";
+import { IGuicosLogger } from "./GuicosLogger";
 import { GuicosWidgetsRegistry } from "./GuicosWidgetsRegistry";
 
 export interface IGuicosGuiFacade {
     readonly widgets: GuicosWidgetsRegistry;
+    readonly logger: IGuicosLogger;
     openScreen<TContext>(screenId: GuicosId, contextOverride?: TContext): Promise<void>;
     closeScreen(screenId: GuicosId): Promise<void>;
     openView<TContext>(viewId: GuicosId, contextOverride?: TContext): Promise<void>;
@@ -18,10 +20,15 @@ export class GuicosGuiFacade implements IGuicosGuiFacade {
         private readonly ownerScreenId: GuicosId,
         private readonly eventTargetScreenId: GuicosId | null,
         private readonly widgetsRegistry: GuicosWidgetsRegistry,
+        private readonly guicosLogger: IGuicosLogger,
     ) { }
 
     public get widgets(): GuicosWidgetsRegistry {
         return this.widgetsRegistry;
+    }
+
+    public get logger(): IGuicosLogger {
+        return this.guicosLogger;
     }
 
     public async openScreen<TContext>(screenId: GuicosId, contextOverride?: TContext): Promise<void> {

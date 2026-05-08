@@ -9,6 +9,7 @@ import {
 } from "./GuicosEventSubscription";
 import type { IGuicosGuiFacade } from "./GuicosGuiFacade";
 import { GuicosId } from "./GuicosId";
+import { GUICOS_NOOP_LOGGER } from "./GuicosLogger";
 
 export interface IGuicosScreen {
     set __gui(gui: IGuicosGuiFacade);
@@ -95,7 +96,8 @@ export abstract class GuicosScreen<TContext, TExtendedContext extends TContext> 
         autoConsume: boolean,
     ): IGuicosEventSubscription {
         if (this._eventSubscriptions.has(eventCtor as GuicosEventCtor<GuicosEvent>)) {
-            console.warn(`[GuicosScreen] Duplicate subscription for event: ${eventCtor.name}. Screen: ${this._screenId ?? this.constructor.name}.`);
+            const logger = this.__gui?.logger ?? GUICOS_NOOP_LOGGER;
+            logger.warn(`[GuicosScreen] Duplicate subscription for event: ${eventCtor.name}. Screen: ${this._screenId ?? this.constructor.name}.`);
             return GUICOS_NOOP_EVENT_SUBSCRIPTION;
         }
 

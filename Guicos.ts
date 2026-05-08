@@ -5,6 +5,7 @@ export * from "./GuicosGuiFacade";
 export * from "./GuicosScreen";
 export * from "./GuicosView";
 export * from "./GuicosContext";
+export * from "./GuicosLogger";
 export * from "./GuicosResourceManager";
 export * from "./GuicosHierarchyRegistry";
 export * from "./GuicosViewsRegistry";

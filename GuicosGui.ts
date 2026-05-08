@@ -4,6 +4,7 @@ import { GuicosEvent } from "./GuicosEvent";
 import { GuicosGuiFacade, IGuicosGuiFacade } from "./GuicosGuiFacade";
 import { GuicosHierarchy, ScreenHierarchyNode } from "./GuicosHierarchyRegistry";
 import { GuicosId } from "./GuicosId";
+import { GUICOS_NOOP_LOGGER, IGuicosLogger } from "./GuicosLogger";
 import { IGuicosScreen } from "./GuicosScreen";
 import { GuicosView } from "./GuicosView";
 import { GuicosViewsRegistry } from "./GuicosViewsRegistry";
@@ -39,6 +40,7 @@ export class GuicosGui {
         hierarchy: GuicosHierarchy,
         viewsRegistry: GuicosViewsRegistry,
         widgetsRegistry: GuicosWidgetsRegistry,
+        private readonly _logger: IGuicosLogger = GUICOS_NOOP_LOGGER,
     ) {
         this._rootNode = rootNode;
         this._hierarchy = hierarchy;
@@ -194,7 +196,7 @@ export class GuicosGui {
     }
 
     private createFacade(ownerScreenId: GuicosId, eventTargetScreenId: GuicosId | null): IGuicosGuiFacade {
-        return new GuicosGuiFacade(this, ownerScreenId, eventTargetScreenId, this._widgetsRegistry);
+        return new GuicosGuiFacade(this, ownerScreenId, eventTargetScreenId, this._widgetsRegistry, this._logger);
     }
 
     private getActiveScreenId(): GuicosId {
