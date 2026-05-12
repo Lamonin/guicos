@@ -26,7 +26,7 @@ export interface ScreenHierarchyNode extends HierarchyNode {
     layers: LayerHierarchyNode[];
 }
 
-export interface LayerHierarchyNode extends HierarchyNode {
+export interface LayerHierarchyNode {
     type: "layer";
     children: Array<ViewHierarchyNode | ScreenHierarchyNode>;
 }
@@ -113,10 +113,9 @@ export function layer<
     TContext,
     TChildren extends readonly LayerChild[]
 >(
-    id: string,
     children: CompatibleChildren<TContext, TChildren>
 ): TypedLayerHierarchyNode<TContext> {
-    return { type: "layer", id, children: [...children] as LayerChild[] };
+    return { type: "layer", children: [...children] as LayerChild[] };
 }
 
 export function view<
@@ -133,11 +132,11 @@ export class GuicosHierarchy {
     private _lookup!: Map<GuicosId, ScreenHierarchyNode | ViewHierarchyNode>;
     private _screenChildren!: Map<GuicosId, Map<GuicosId, ScreenHierarchyNode | ViewHierarchyNode>>;
     private _screenParents!: Map<GuicosId, GuicosId>;
-    private _screenLayers!: Map<GuicosId, GuicosId>;
-    private _screenIdsByParentLayer!: Map<GuicosId, Map<GuicosId, GuicosId[]>>;
+    private _screenLayers!: Map<GuicosId, number>;
+    private _screenIdsByParentLayer!: Map<GuicosId, Map<number, GuicosId[]>>;
     private _viewHostScreens!: Map<GuicosId, GuicosId>;
-    private _viewLayers!: Map<GuicosId, GuicosId>;
-    private _viewIdsByHostLayer!: Map<GuicosId, Map<GuicosId, GuicosId[]>>;
+    private _viewLayers!: Map<GuicosId, number>;
+    private _viewIdsByHostLayer!: Map<GuicosId, Map<number, GuicosId[]>>;
     private _viewOrder!: Map<GuicosId, number>;
 
     /**
@@ -156,11 +155,11 @@ export class GuicosHierarchy {
         this._lookup = new Map<GuicosId, ScreenHierarchyNode | ViewHierarchyNode>();
         this._screenChildren = new Map<GuicosId, Map<GuicosId, ScreenHierarchyNode | ViewHierarchyNode>>();
         this._screenParents = new Map<GuicosId, GuicosId>();
-        this._screenLayers = new Map<GuicosId, GuicosId>();
-        this._screenIdsByParentLayer = new Map<GuicosId, Map<GuicosId, GuicosId[]>>();
+        this._screenLayers = new Map<GuicosId, number>();
+        this._screenIdsByParentLayer = new Map<GuicosId, Map<number, GuicosId[]>>();
         this._viewHostScreens = new Map<GuicosId, GuicosId>();
-        this._viewLayers = new Map<GuicosId, GuicosId>();
-        this._viewIdsByHostLayer = new Map<GuicosId, Map<GuicosId, GuicosId[]>>();
+        this._viewLayers = new Map<GuicosId, number>();
+        this._viewIdsByHostLayer = new Map<GuicosId, Map<number, GuicosId[]>>();
         this._viewOrder = new Map<GuicosId, number>();
         let nextViewOrder = 0;
 
@@ -168,7 +167,7 @@ export class GuicosHierarchy {
             node: ScreenHierarchyNode | ViewHierarchyNode,
             parentScreenId?: GuicosId,
             hostScreenId?: GuicosId,
-            layerId?: GuicosId,
+            layerKey?: number,
         ) => {
             if (this._lookup.has(node.id)) {
                 throw new Error(`Duplicate hierarchy node id: ${node.id}`);
@@ -180,21 +179,21 @@ export class GuicosHierarchy {
                 this._screenParents.set(node.id, parentScreenId);
 
                 if (node.type === "screen") {
-                    if (layerId === undefined) {
-                        throw new Error(`No layer id for screen: ${node.id}`);
+                    if (layerKey === undefined) {
+                        throw new Error(`No layer for screen: ${node.id}`);
                     }
 
-                    this._screenLayers.set(node.id, layerId);
+                    this._screenLayers.set(node.id, layerKey);
                     let screenIdsByLayer = this._screenIdsByParentLayer.get(parentScreenId);
                     if (screenIdsByLayer === undefined) {
-                        screenIdsByLayer = new Map<GuicosId, GuicosId[]>();
+                        screenIdsByLayer = new Map<number, GuicosId[]>();
                         this._screenIdsByParentLayer.set(parentScreenId, screenIdsByLayer);
                     }
 
-                    let screenIds = screenIdsByLayer.get(layerId);
+                    let screenIds = screenIdsByLayer.get(layerKey);
                     if (screenIds === undefined) {
                         screenIds = [];
-                        screenIdsByLayer.set(layerId, screenIds);
+                        screenIdsByLayer.set(layerKey, screenIds);
                     }
 
                     screenIds.push(node.id);
@@ -206,21 +205,21 @@ export class GuicosHierarchy {
                 this._viewOrder.set(node.id, nextViewOrder++);
 
                 if (node.type === "view") {
-                    if (layerId === undefined) {
-                        throw new Error(`No layer id for view: ${node.id}`);
+                    if (layerKey === undefined) {
+                        throw new Error(`No layer for view: ${node.id}`);
                     }
 
-                    this._viewLayers.set(node.id, layerId);
+                    this._viewLayers.set(node.id, layerKey);
                     let viewIdsByLayer = this._viewIdsByHostLayer.get(hostScreenId);
                     if (viewIdsByLayer === undefined) {
-                        viewIdsByLayer = new Map<GuicosId, GuicosId[]>();
+                        viewIdsByLayer = new Map<number, GuicosId[]>();
                         this._viewIdsByHostLayer.set(hostScreenId, viewIdsByLayer);
                     }
 
-                    let viewIds = viewIdsByLayer.get(layerId);
+                    let viewIds = viewIdsByLayer.get(layerKey);
                     if (viewIds === undefined) {
                         viewIds = [];
-                        viewIdsByLayer.set(layerId, viewIds);
+                        viewIdsByLayer.set(layerKey, viewIds);
                     }
 
                     viewIds.push(node.id);
@@ -234,7 +233,8 @@ export class GuicosHierarchy {
             const screenChildren = new Map<GuicosId, ScreenHierarchyNode | ViewHierarchyNode>();
             this._screenChildren.set(node.id, screenChildren);
 
-            for (const layer of node.layers) {
+            for (let layerIndex = 0; layerIndex < node.layers.length; layerIndex++) {
+                const layer = node.layers[layerIndex];
                 for (const child of layer.children) {
                     if (screenChildren.has(child.id)) {
                         throw new Error(`Duplicate child node id: ${child.id} in screen: ${node.id}`);
@@ -243,9 +243,9 @@ export class GuicosHierarchy {
                     screenChildren.set(child.id, child);
 
                     if (child.type === "view") {
-                        registerNode(child, undefined, node.id, layer.id);
+                        registerNode(child, undefined, node.id, layerIndex);
                     } else {
-                        registerNode(child, node.id, undefined, layer.id);
+                        registerNode(child, node.id, undefined, layerIndex);
                     }
                 }
             }
@@ -329,13 +329,13 @@ export class GuicosHierarchy {
             return [];
         }
 
-        const layerId = this._screenLayers.get(screenId);
-        if (layerId === undefined) {
+        const layerKey = this._screenLayers.get(screenId);
+        if (layerKey === undefined) {
             throw new Error(`No layer for screen id: ${screenId}`);
         }
 
         const screenIdsByLayer = this._screenIdsByParentLayer.get(parentScreenId);
-        const screenIds = screenIdsByLayer?.get(layerId) ?? [];
+        const screenIds = screenIdsByLayer?.get(layerKey) ?? [];
 
         return screenIds.filter(siblingScreenId => siblingScreenId !== screenId);
     }
@@ -351,13 +351,13 @@ export class GuicosHierarchy {
         }
 
         const hostScreenId = this.getHostScreenId(viewId);
-        const layerId = this._viewLayers.get(viewId);
-        if (layerId === undefined) {
+        const layerKey = this._viewLayers.get(viewId);
+        if (layerKey === undefined) {
             throw new Error(`No layer for view id: ${viewId}`);
         }
 
         const viewIdsByLayer = this._viewIdsByHostLayer.get(hostScreenId);
-        const viewIds = viewIdsByLayer?.get(layerId) ?? [];
+        const viewIds = viewIdsByLayer?.get(layerKey) ?? [];
 
         return viewIds.filter(siblingViewId => siblingViewId !== viewId);
     }
