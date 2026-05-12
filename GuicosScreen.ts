@@ -97,7 +97,8 @@ export abstract class GuicosScreen<TContext, TExtendedContext extends TContext> 
     ): IGuicosEventSubscription {
         if (this._eventSubscriptions.has(eventCtor as GuicosEventCtor<GuicosEvent>)) {
             const logger = this.__gui?.logger ?? GUICOS_NOOP_LOGGER;
-            logger.warn(`[GuicosScreen] Duplicate subscription for event: ${eventCtor.name}. Screen: ${this._screenId ?? this.constructor.name}.`);
+            const eventName = eventCtor.eventId ?? (eventCtor as Function).name;
+            logger.warn(`[GuicosScreen] Duplicate subscription for event: ${eventName}. Screen: ${this._screenId ?? this.constructor.name}.`);
             return GUICOS_NOOP_EVENT_SUBSCRIPTION;
         }
 

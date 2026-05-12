@@ -1,7 +1,8 @@
 import type { MaybePromise } from "./GuicosContext";
 import { GuicosEvent } from "./GuicosEvent";
+import type { GuicosEventCtor } from "./GuicosEvent";
 
-export type GuicosEventCtor<TEvent extends GuicosEvent> = new (...args: any[]) => TEvent;
+export type { GuicosEventCtor } from "./GuicosEvent";
 
 export interface IGuicosEventSubscription {
     readonly isActive: boolean;

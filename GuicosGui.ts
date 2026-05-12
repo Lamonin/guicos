@@ -178,6 +178,10 @@ export class GuicosGui {
 
     public async publishEventToScreen(targetScreenId: GuicosId | null, event: GuicosEvent): Promise<boolean> {
         if (targetScreenId === null) {
+            if (!event.isConsumed) {
+                this._logger.warn(`[GuicosGui] Event was not handled: ${event.id}`);
+            }
+
             return event.isConsumed;
         }
 
