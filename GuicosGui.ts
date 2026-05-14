@@ -79,7 +79,7 @@ export class GuicosGui {
                 ? contextOverride
                 : await parentScreen.getExtendedContext();
 
-            await this.closeSameLayerSiblingScreens(screenId);
+            await this.closeSameSlotSiblingScreens(screenId);
 
             const openedScreen = this._screenInstances.get(screenId);
             if (openedScreen !== undefined) {
@@ -145,7 +145,7 @@ export class GuicosGui {
             view.node.active = true;
             this.attachOpenedView(viewId, view);
             await view.show();
-            await this.closeSameLayerSiblingViews(viewId);
+            await this.closeSameSlotSiblingViews(viewId);
         });
     }
 
@@ -235,8 +235,8 @@ export class GuicosGui {
         return screenInstance;
     }
 
-    private async closeSameLayerSiblingScreens(screenId: GuicosId): Promise<void> {
-        const siblingScreenIds = this._hierarchy.getSameLayerSiblingScreenIds(screenId);
+    private async closeSameSlotSiblingScreens(screenId: GuicosId): Promise<void> {
+        const siblingScreenIds = this._hierarchy.getSameSlotSiblingScreenIds(screenId);
         for (const siblingScreenId of siblingScreenIds) {
             if (!this._screenInstances.has(siblingScreenId)) {
                 continue;
@@ -246,8 +246,8 @@ export class GuicosGui {
         }
     }
 
-    private async closeSameLayerSiblingViews(viewId: GuicosId): Promise<void> {
-        const siblingViewIds = this._hierarchy.getSameLayerSiblingViewIds(viewId);
+    private async closeSameSlotSiblingViews(viewId: GuicosId): Promise<void> {
+        const siblingViewIds = this._hierarchy.getSameSlotSiblingViewIds(viewId);
         for (const siblingViewId of siblingViewIds) {
             const siblingView = this._openedViews.get(siblingViewId);
             if (siblingView === undefined) {

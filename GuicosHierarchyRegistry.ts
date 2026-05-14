@@ -5,6 +5,7 @@ import { IProvideContext, IReceiveContext } from "./GuicosContext";
 
 type ScreenCtor<TScreen extends IGuicosScreen> = new (...args: any[]) => TScreen;
 type ViewCtor<TView extends IGuicosView> = new (...args: any[]) => TView;
+type SlotKey = string;
 
 type ReceivedContext<T> =
     T extends IReceiveContext<infer C> ? C : never;
@@ -23,11 +24,12 @@ export interface HierarchyNode {
 export interface ScreenHierarchyNode extends HierarchyNode {
     type: "screen";
     ctor: ScreenCtor<any>;
-    layers: LayerHierarchyNode[];
+    slots: SlotHierarchyNode[];
 }
 
-export interface LayerHierarchyNode {
-    type: "layer";
+export interface SlotHierarchyNode {
+    type: "slot";
+    name: string;
     children: Array<ViewHierarchyNode | ScreenHierarchyNode>;
 }
 
@@ -40,7 +42,7 @@ export interface TypedScreenHierarchyNode<
     TScreen extends IGuicosScreen & IReceiveContext<any> & IProvideContext<any>
 > extends ScreenHierarchyNode {
     ctor: ScreenCtor<TScreen>;
-    layers: TypedLayerHierarchyNode<ProvidedContext<TScreen>>[];
+    slots: TypedSlotHierarchyNode<ProvidedContext<TScreen>>[];
 }
 
 export interface TypedViewHierarchyNode<
@@ -59,9 +61,9 @@ type AnyTypedViewNode =
         IGuicosView & IReceiveContext<any>
     >;
 
-type LayerChild = AnyTypedViewNode | AnyTypedScreenNode;
+type SlotChild = AnyTypedViewNode | AnyTypedScreenNode;
 
-type ChildContext<TChild extends LayerChild> =
+type ChildContext<TChild extends SlotChild> =
     TChild extends TypedViewHierarchyNode<infer TView>
         ? ReceivedContext<TView>
         : TChild extends TypedScreenHierarchyNode<infer TScreen>
@@ -80,7 +82,7 @@ type WrongContext<
 
 type CompatibleChild<
     TContext,
-    TChild extends LayerChild
+    TChild extends SlotChild
 > = TContext extends ChildContext<TChild>
     ? TChild
     : WrongContext<
@@ -90,13 +92,13 @@ type CompatibleChild<
 
 type CompatibleChildren<
     TContext,
-    TChildren extends readonly LayerChild[]
+    TChildren extends readonly SlotChild[]
 > = {
     [K in keyof TChildren]: CompatibleChild<TContext, TChildren[K]>;
 };
 
-export interface TypedLayerHierarchyNode<TContext> extends LayerHierarchyNode {
-    children: LayerChild[];
+export interface TypedSlotHierarchyNode<TContext> extends SlotHierarchyNode {
+    children: SlotChild[];
 }
 
 export function screen<
@@ -104,18 +106,23 @@ export function screen<
 >(
     id: GuicosId,
     ctor: ScreenCtor<TScreen>,
-    layers: TypedLayerHierarchyNode<ProvidedContext<TScreen>>[] = []
+    slots: TypedSlotHierarchyNode<ProvidedContext<TScreen>>[] = []
 ): TypedScreenHierarchyNode<TScreen> {
-    return { type: "screen", id, ctor, layers };
+    return { type: "screen", id, ctor, slots };
 }
 
-export function layer<
+export function slot<
     TContext,
-    TChildren extends readonly LayerChild[]
+    TChildren extends readonly SlotChild[]
 >(
+    name: string,
     children: CompatibleChildren<TContext, TChildren>
-): TypedLayerHierarchyNode<TContext> {
-    return { type: "layer", children: [...children] as LayerChild[] };
+): TypedSlotHierarchyNode<TContext> {
+    if (name.length === 0) {
+        throw new Error("Slot name must not be empty");
+    }
+
+    return { type: "slot", name, children: [...children] as SlotChild[] };
 }
 
 export function view<
@@ -132,11 +139,11 @@ export class GuicosHierarchy {
     private _lookup!: Map<GuicosId, ScreenHierarchyNode | ViewHierarchyNode>;
     private _screenChildren!: Map<GuicosId, Map<GuicosId, ScreenHierarchyNode | ViewHierarchyNode>>;
     private _screenParents!: Map<GuicosId, GuicosId>;
-    private _screenLayers!: Map<GuicosId, number>;
-    private _screenIdsByParentLayer!: Map<GuicosId, Map<number, GuicosId[]>>;
+    private _screenSlots!: Map<GuicosId, SlotKey>;
+    private _screenIdsByParentSlot!: Map<GuicosId, Map<SlotKey, GuicosId[]>>;
     private _viewHostScreens!: Map<GuicosId, GuicosId>;
-    private _viewLayers!: Map<GuicosId, number>;
-    private _viewIdsByHostLayer!: Map<GuicosId, Map<number, GuicosId[]>>;
+    private _viewSlots!: Map<GuicosId, SlotKey>;
+    private _viewIdsByHostSlot!: Map<GuicosId, Map<SlotKey, GuicosId[]>>;
     private _viewOrder!: Map<GuicosId, number>;
 
     /**
@@ -155,11 +162,11 @@ export class GuicosHierarchy {
         this._lookup = new Map<GuicosId, ScreenHierarchyNode | ViewHierarchyNode>();
         this._screenChildren = new Map<GuicosId, Map<GuicosId, ScreenHierarchyNode | ViewHierarchyNode>>();
         this._screenParents = new Map<GuicosId, GuicosId>();
-        this._screenLayers = new Map<GuicosId, number>();
-        this._screenIdsByParentLayer = new Map<GuicosId, Map<number, GuicosId[]>>();
+        this._screenSlots = new Map<GuicosId, SlotKey>();
+        this._screenIdsByParentSlot = new Map<GuicosId, Map<SlotKey, GuicosId[]>>();
         this._viewHostScreens = new Map<GuicosId, GuicosId>();
-        this._viewLayers = new Map<GuicosId, number>();
-        this._viewIdsByHostLayer = new Map<GuicosId, Map<number, GuicosId[]>>();
+        this._viewSlots = new Map<GuicosId, SlotKey>();
+        this._viewIdsByHostSlot = new Map<GuicosId, Map<SlotKey, GuicosId[]>>();
         this._viewOrder = new Map<GuicosId, number>();
         let nextViewOrder = 0;
 
@@ -167,7 +174,7 @@ export class GuicosHierarchy {
             node: ScreenHierarchyNode | ViewHierarchyNode,
             parentScreenId?: GuicosId,
             hostScreenId?: GuicosId,
-            layerKey?: number,
+            slotKey?: SlotKey,
         ) => {
             if (this._lookup.has(node.id)) {
                 throw new Error(`Duplicate hierarchy node id: ${node.id}`);
@@ -179,21 +186,21 @@ export class GuicosHierarchy {
                 this._screenParents.set(node.id, parentScreenId);
 
                 if (node.type === "screen") {
-                    if (layerKey === undefined) {
-                        throw new Error(`No layer for screen: ${node.id}`);
+                    if (slotKey === undefined) {
+                        throw new Error(`No slot for screen: ${node.id}`);
                     }
 
-                    this._screenLayers.set(node.id, layerKey);
-                    let screenIdsByLayer = this._screenIdsByParentLayer.get(parentScreenId);
-                    if (screenIdsByLayer === undefined) {
-                        screenIdsByLayer = new Map<number, GuicosId[]>();
-                        this._screenIdsByParentLayer.set(parentScreenId, screenIdsByLayer);
+                    this._screenSlots.set(node.id, slotKey);
+                    let screenIdsBySlot = this._screenIdsByParentSlot.get(parentScreenId);
+                    if (screenIdsBySlot === undefined) {
+                        screenIdsBySlot = new Map<SlotKey, GuicosId[]>();
+                        this._screenIdsByParentSlot.set(parentScreenId, screenIdsBySlot);
                     }
 
-                    let screenIds = screenIdsByLayer.get(layerKey);
+                    let screenIds = screenIdsBySlot.get(slotKey);
                     if (screenIds === undefined) {
                         screenIds = [];
-                        screenIdsByLayer.set(layerKey, screenIds);
+                        screenIdsBySlot.set(slotKey, screenIds);
                     }
 
                     screenIds.push(node.id);
@@ -205,21 +212,21 @@ export class GuicosHierarchy {
                 this._viewOrder.set(node.id, nextViewOrder++);
 
                 if (node.type === "view") {
-                    if (layerKey === undefined) {
-                        throw new Error(`No layer for view: ${node.id}`);
+                    if (slotKey === undefined) {
+                        throw new Error(`No slot for view: ${node.id}`);
                     }
 
-                    this._viewLayers.set(node.id, layerKey);
-                    let viewIdsByLayer = this._viewIdsByHostLayer.get(hostScreenId);
-                    if (viewIdsByLayer === undefined) {
-                        viewIdsByLayer = new Map<number, GuicosId[]>();
-                        this._viewIdsByHostLayer.set(hostScreenId, viewIdsByLayer);
+                    this._viewSlots.set(node.id, slotKey);
+                    let viewIdsBySlot = this._viewIdsByHostSlot.get(hostScreenId);
+                    if (viewIdsBySlot === undefined) {
+                        viewIdsBySlot = new Map<SlotKey, GuicosId[]>();
+                        this._viewIdsByHostSlot.set(hostScreenId, viewIdsBySlot);
                     }
 
-                    let viewIds = viewIdsByLayer.get(layerKey);
+                    let viewIds = viewIdsBySlot.get(slotKey);
                     if (viewIds === undefined) {
                         viewIds = [];
-                        viewIdsByLayer.set(layerKey, viewIds);
+                        viewIdsBySlot.set(slotKey, viewIds);
                     }
 
                     viewIds.push(node.id);
@@ -231,11 +238,20 @@ export class GuicosHierarchy {
             }
 
             const screenChildren = new Map<GuicosId, ScreenHierarchyNode | ViewHierarchyNode>();
+            const screenSlotNames = new Set<string>();
             this._screenChildren.set(node.id, screenChildren);
 
-            for (let layerIndex = 0; layerIndex < node.layers.length; layerIndex++) {
-                const layer = node.layers[layerIndex];
-                for (const child of layer.children) {
+            for (let slotIndex = 0; slotIndex < node.slots.length; slotIndex++) {
+                const slot = node.slots[slotIndex];
+                const slotKey = slot.name;
+
+                if (screenSlotNames.has(slotKey)) {
+                    throw new Error(`Duplicate slot name: ${slotKey} in screen: ${node.id}`);
+                }
+
+                screenSlotNames.add(slotKey);
+
+                for (const child of slot.children) {
                     if (screenChildren.has(child.id)) {
                         throw new Error(`Duplicate child node id: ${child.id} in screen: ${node.id}`);
                     }
@@ -243,9 +259,9 @@ export class GuicosHierarchy {
                     screenChildren.set(child.id, child);
 
                     if (child.type === "view") {
-                        registerNode(child, undefined, node.id, layerIndex);
+                        registerNode(child, undefined, node.id, slotKey);
                     } else {
-                        registerNode(child, node.id, undefined, layerIndex);
+                        registerNode(child, node.id, undefined, slotKey);
                     }
                 }
             }
@@ -321,7 +337,7 @@ export class GuicosHierarchy {
         return parentScreenId;
     }
 
-    public getSameLayerSiblingScreenIds(screenId: GuicosId): GuicosId[] {
+    public getSameSlotSiblingScreenIds(screenId: GuicosId): GuicosId[] {
         this.getScreen(screenId);
 
         const parentScreenId = this.getParentScreenId(screenId);
@@ -329,18 +345,18 @@ export class GuicosHierarchy {
             return [];
         }
 
-        const layerKey = this._screenLayers.get(screenId);
-        if (layerKey === undefined) {
-            throw new Error(`No layer for screen id: ${screenId}`);
+        const slotKey = this._screenSlots.get(screenId);
+        if (slotKey === undefined) {
+            throw new Error(`No slot for screen id: ${screenId}`);
         }
 
-        const screenIdsByLayer = this._screenIdsByParentLayer.get(parentScreenId);
-        const screenIds = screenIdsByLayer?.get(layerKey) ?? [];
+        const screenIdsBySlot = this._screenIdsByParentSlot.get(parentScreenId);
+        const screenIds = screenIdsBySlot?.get(slotKey) ?? [];
 
         return screenIds.filter(siblingScreenId => siblingScreenId !== screenId);
     }
 
-    public getSameLayerSiblingViewIds(viewId: GuicosId): GuicosId[] {
+    public getSameSlotSiblingViewIds(viewId: GuicosId): GuicosId[] {
         const node = this._lookup.get(viewId);
         if (node === undefined) {
             throw new Error(`No view with id: ${viewId} in hierarchy`);
@@ -351,13 +367,13 @@ export class GuicosHierarchy {
         }
 
         const hostScreenId = this.getHostScreenId(viewId);
-        const layerKey = this._viewLayers.get(viewId);
-        if (layerKey === undefined) {
-            throw new Error(`No layer for view id: ${viewId}`);
+        const slotKey = this._viewSlots.get(viewId);
+        if (slotKey === undefined) {
+            throw new Error(`No slot for view id: ${viewId}`);
         }
 
-        const viewIdsByLayer = this._viewIdsByHostLayer.get(hostScreenId);
-        const viewIds = viewIdsByLayer?.get(layerKey) ?? [];
+        const viewIdsBySlot = this._viewIdsByHostSlot.get(hostScreenId);
+        const viewIds = viewIdsBySlot?.get(slotKey) ?? [];
 
         return viewIds.filter(siblingViewId => siblingViewId !== viewId);
     }
