@@ -22,6 +22,8 @@ type RuntimeView = GuicosView<any> & IReceiveContext<any> & {
     __bindRuntime(viewId: GuicosId, hostScreenId: GuicosId, gui: IGuicosGuiFacade): void;
 };
 
+type ScopedViewKey = string;
+
 export class GuicosGui {
     private readonly _rootNode: Node;
     private readonly _hierarchy: GuicosHierarchy;
@@ -30,8 +32,8 @@ export class GuicosGui {
 
     private readonly _historyStack: RuntimeScreen[] = [];
     private readonly _screenInstances: Map<GuicosId, RuntimeScreen> = new Map<GuicosId, RuntimeScreen>();
-    private readonly _openedViews: Map<GuicosId, RuntimeView> = new Map<GuicosId, RuntimeView>();
-    private readonly _openedViewIdsByOrder: GuicosId[] = [];
+    private readonly _openedViews: Map<ScopedViewKey, RuntimeView> = new Map<ScopedViewKey, RuntimeView>();
+    private readonly _openedViewKeysByOrder: ScopedViewKey[] = [];
     private _transitionDepth = 0;
     private _transitionQueue: Promise<void> = Promise.resolve();
 
@@ -121,20 +123,26 @@ export class GuicosGui {
         await this.runTransition(async () => {
             const parentScreen = this.getScreenContextSource(parentScreenId);
             const childView = this._hierarchy.getDirectChildView(parentScreenId, viewId);
+            const scopedViewKey = this.createScopedViewKey(parentScreenId, viewId);
             const view = await this.getOrCreateRuntimeView(childView.id, childView.ctor, parentScreenId);
             const childContext = contextOverride !== undefined
                 ? contextOverride
                 : await parentScreen.getExtendedContext();
 
             await view.setContext(childContext);
-            const openedView = this._openedViews.get(viewId);
+            const openedView = this._openedViews.get(scopedViewKey);
             if (openedView !== undefined) {
                 if (this.isViewMounted(openedView)) {
+                    if (!openedView.node.active) {
+                        openedView.node.active = true;
+                        await openedView.show();
+                    }
+
                     return;
                 }
 
-                this._openedViews.delete(viewId);
-                this.detachOpenedView(viewId);
+                this._openedViews.delete(scopedViewKey);
+                this.detachOpenedView(scopedViewKey);
             }
 
             if (view.node.parent !== this._rootNode) {
@@ -143,9 +151,9 @@ export class GuicosGui {
 
             await view.mount();
             view.node.active = true;
-            this.attachOpenedView(viewId, view);
+            this.attachOpenedView(scopedViewKey, view);
             await view.show();
-            await this.closeSameSlotSiblingViews(viewId);
+            await this.closeSameSlotSiblingViews(parentScreenId, viewId);
         });
     }
 
@@ -156,8 +164,9 @@ export class GuicosGui {
     public async closeViewFrom(parentScreenId: GuicosId, viewId: GuicosId): Promise<void> {
         await this.runTransition(async () => {
             this._hierarchy.getDirectChildView(parentScreenId, viewId);
+            const scopedViewKey = this.createScopedViewKey(parentScreenId, viewId);
 
-            const view = this._openedViews.get(viewId);
+            const view = this._openedViews.get(scopedViewKey);
             if (view === undefined) {
                 return;
             }
@@ -167,12 +176,12 @@ export class GuicosGui {
             }
 
             if (!this.isViewMounted(view)) {
-                this._openedViews.delete(viewId);
-                this.detachOpenedView(viewId);
+                this._openedViews.delete(scopedViewKey);
+                this.detachOpenedView(scopedViewKey);
                 return;
             }
 
-            await this.closeMountedView(viewId, view);
+            await this.closeMountedView(scopedViewKey, view);
         });
     }
 
@@ -246,15 +255,16 @@ export class GuicosGui {
         }
     }
 
-    private async closeSameSlotSiblingViews(viewId: GuicosId): Promise<void> {
-        const siblingViewIds = this._hierarchy.getSameSlotSiblingViewIds(viewId);
+    private async closeSameSlotSiblingViews(hostScreenId: GuicosId, viewId: GuicosId): Promise<void> {
+        const siblingViewIds = this._hierarchy.getSameSlotSiblingViewIds(hostScreenId, viewId);
         for (const siblingViewId of siblingViewIds) {
-            const siblingView = this._openedViews.get(siblingViewId);
+            const scopedSiblingViewKey = this.createScopedViewKey(hostScreenId, siblingViewId);
+            const siblingView = this._openedViews.get(scopedSiblingViewKey);
             if (siblingView === undefined) {
                 continue;
             }
 
-            await this.closeMountedView(siblingViewId, siblingView);
+            await this.closeMountedView(scopedSiblingViewKey, siblingView);
         }
     }
 
@@ -290,12 +300,8 @@ export class GuicosGui {
     }
 
     private async getOrCreateRuntimeView(viewId: GuicosId, viewCtor: new (...args: any[]) => GuicosView<any>, parentScreenId: GuicosId): Promise<RuntimeView> {
-        const hostScreenId = this._hierarchy.getHostScreenId(viewId);
-        if (hostScreenId !== parentScreenId) {
-            throw new Error(`View with id: ${viewId} belongs to screen: ${hostScreenId}, not: ${parentScreenId}`);
-        }
-
-        const view = await this._viewsRegistry.getOrCreateView(viewId, viewCtor) as RuntimeView;
+        const scopedViewId = this.createScopedViewKey(parentScreenId, viewId);
+        const view = await this._viewsRegistry.getOrCreateView(scopedViewId, viewCtor, viewId) as RuntimeView;
         view.__bindRuntime(viewId, parentScreenId, this.createFacade(parentScreenId, parentScreenId));
         return view;
     }
@@ -320,29 +326,29 @@ export class GuicosGui {
         }
     }
 
-    private attachOpenedView(viewId: GuicosId, view: RuntimeView): void {
-        const insertionIndex = this.findOpenedViewInsertionIndex(viewId);
-        this._openedViews.set(viewId, view);
-        this._openedViewIdsByOrder.splice(insertionIndex, 0, viewId);
+    private attachOpenedView(scopedViewKey: ScopedViewKey, view: RuntimeView): void {
+        const insertionIndex = this.findOpenedViewInsertionIndex(view.hostScreenId, view.viewId);
+        this._openedViews.set(scopedViewKey, view);
+        this._openedViewKeysByOrder.splice(insertionIndex, 0, scopedViewKey);
         view.node.setSiblingIndex(insertionIndex);
     }
 
     private async closeViewsForScreen(screenId: GuicosId): Promise<void> {
-        const viewIdsToClose = [...this._openedViews.entries()]
+        const viewKeysToClose = [...this._openedViews.entries()]
             .filter(([, view]) => view.hostScreenId === screenId)
-            .map(([viewId]) => viewId);
+            .map(([scopedViewKey]) => scopedViewKey);
 
-        for (const viewId of viewIdsToClose) {
-            const view = this._openedViews.get(viewId);
+        for (const scopedViewKey of viewKeysToClose) {
+            const view = this._openedViews.get(scopedViewKey);
             if (view === undefined) {
                 continue;
             }
 
-            await this.closeMountedView(viewId, view);
+            await this.closeMountedView(scopedViewKey, view);
         }
     }
 
-    private async closeMountedView(viewId: GuicosId, view: RuntimeView): Promise<void> {
+    private async closeMountedView(scopedViewKey: ScopedViewKey, view: RuntimeView): Promise<void> {
         try {
             if (!this.isViewAlive(view)) {
                 return;
@@ -364,8 +370,8 @@ export class GuicosGui {
             view.node.active = false;
             view.node.removeFromParent();
         } finally {
-            this._openedViews.delete(viewId);
-            this.detachOpenedView(viewId);
+            this._openedViews.delete(scopedViewKey);
+            this.detachOpenedView(scopedViewKey);
         }
     }
 
@@ -377,23 +383,28 @@ export class GuicosGui {
         return this.isViewAlive(view) && view.node.parent === this._rootNode;
     }
 
-    private detachOpenedView(viewId: GuicosId): void {
-        const openedViewIndex = this.findOpenedViewIndex(viewId);
+    private detachOpenedView(scopedViewKey: ScopedViewKey): void {
+        const openedViewIndex = this.findOpenedViewIndex(scopedViewKey);
         if (openedViewIndex === -1) {
             return;
         }
 
-        this._openedViewIdsByOrder.splice(openedViewIndex, 1);
+        this._openedViewKeysByOrder.splice(openedViewIndex, 1);
     }
 
-    private findOpenedViewInsertionIndex(viewId: GuicosId): number {
-        const targetOrder = this._hierarchy.getViewOrder(viewId);
+    private findOpenedViewInsertionIndex(hostScreenId: GuicosId, viewId: GuicosId): number {
+        const targetOrder = this._hierarchy.getViewOrder(hostScreenId, viewId);
         let left = 0;
-        let right = this._openedViewIdsByOrder.length;
+        let right = this._openedViewKeysByOrder.length;
 
         while (left < right) {
             const middle = Math.floor((left + right) / 2);
-            const currentOrder = this._hierarchy.getViewOrder(this._openedViewIdsByOrder[middle]);
+            const currentView = this._openedViews.get(this._openedViewKeysByOrder[middle]);
+            if (currentView === undefined) {
+                break;
+            }
+
+            const currentOrder = this._hierarchy.getViewOrder(currentView.hostScreenId, currentView.viewId);
             if (currentOrder < targetOrder) {
                 left = middle + 1;
             } else {
@@ -404,27 +415,11 @@ export class GuicosGui {
         return left;
     }
 
-    private findOpenedViewIndex(viewId: GuicosId): number {
-        const targetOrder = this._hierarchy.getViewOrder(viewId);
-        let left = 0;
-        let right = this._openedViewIdsByOrder.length - 1;
+    private findOpenedViewIndex(scopedViewKey: ScopedViewKey): number {
+        return this._openedViewKeysByOrder.indexOf(scopedViewKey);
+    }
 
-        while (left <= right) {
-            const middle = Math.floor((left + right) / 2);
-            const currentViewId = this._openedViewIdsByOrder[middle];
-            const currentOrder = this._hierarchy.getViewOrder(currentViewId);
-
-            if (currentOrder === targetOrder) {
-                return middle;
-            }
-
-            if (currentOrder < targetOrder) {
-                left = middle + 1;
-            } else {
-                right = middle - 1;
-            }
-        }
-
-        return -1;
+    private createScopedViewKey(hostScreenId: GuicosId, viewId: GuicosId): ScopedViewKey {
+        return `${hostScreenId}::${viewId}`;
     }
 }

@@ -6,6 +6,7 @@ import { IProvideContext, IReceiveContext } from "./GuicosContext";
 type ScreenCtor<TScreen extends IGuicosScreen> = new (...args: any[]) => TScreen;
 type ViewCtor<TView extends IGuicosView> = new (...args: any[]) => TView;
 type SlotKey = string;
+type ScopedViewKey = string;
 
 type ReceivedContext<T> =
     T extends IReceiveContext<infer C> ? C : never;
@@ -136,15 +137,14 @@ export function view<
 
 export class GuicosHierarchy {
     private _hierarchy: ScreenHierarchyNode;
-    private _lookup!: Map<GuicosId, ScreenHierarchyNode | ViewHierarchyNode>;
+    private _screenLookup!: Map<GuicosId, ScreenHierarchyNode>;
     private _screenChildren!: Map<GuicosId, Map<GuicosId, ScreenHierarchyNode | ViewHierarchyNode>>;
     private _screenParents!: Map<GuicosId, GuicosId>;
     private _screenSlots!: Map<GuicosId, SlotKey>;
     private _screenIdsByParentSlot!: Map<GuicosId, Map<SlotKey, GuicosId[]>>;
-    private _viewHostScreens!: Map<GuicosId, GuicosId>;
-    private _viewSlots!: Map<GuicosId, SlotKey>;
+    private _viewSlots!: Map<ScopedViewKey, SlotKey>;
     private _viewIdsByHostSlot!: Map<GuicosId, Map<SlotKey, GuicosId[]>>;
-    private _viewOrder!: Map<GuicosId, number>;
+    private _viewOrder!: Map<ScopedViewKey, number>;
 
     /**
      * Id корневого экрана
@@ -159,15 +159,14 @@ export class GuicosHierarchy {
     }
 
     private createLookup() {
-        this._lookup = new Map<GuicosId, ScreenHierarchyNode | ViewHierarchyNode>();
+        this._screenLookup = new Map<GuicosId, ScreenHierarchyNode>();
         this._screenChildren = new Map<GuicosId, Map<GuicosId, ScreenHierarchyNode | ViewHierarchyNode>>();
         this._screenParents = new Map<GuicosId, GuicosId>();
         this._screenSlots = new Map<GuicosId, SlotKey>();
         this._screenIdsByParentSlot = new Map<GuicosId, Map<SlotKey, GuicosId[]>>();
-        this._viewHostScreens = new Map<GuicosId, GuicosId>();
-        this._viewSlots = new Map<GuicosId, SlotKey>();
+        this._viewSlots = new Map<ScopedViewKey, SlotKey>();
         this._viewIdsByHostSlot = new Map<GuicosId, Map<SlotKey, GuicosId[]>>();
-        this._viewOrder = new Map<GuicosId, number>();
+        this._viewOrder = new Map<ScopedViewKey, number>();
         let nextViewOrder = 0;
 
         const registerNode = (
@@ -176,11 +175,13 @@ export class GuicosHierarchy {
             hostScreenId?: GuicosId,
             slotKey?: SlotKey,
         ) => {
-            if (this._lookup.has(node.id)) {
-                throw new Error(`Duplicate hierarchy node id: ${node.id}`);
-            }
+            if (node.type === "screen") {
+                if (this._screenLookup.has(node.id)) {
+                    throw new Error(`Duplicate screen hierarchy node id: ${node.id}`);
+                }
 
-            this._lookup.set(node.id, node);
+                this._screenLookup.set(node.id, node);
+            }
 
             if (parentScreenId !== undefined) {
                 this._screenParents.set(node.id, parentScreenId);
@@ -208,15 +209,19 @@ export class GuicosHierarchy {
             }
 
             if (hostScreenId !== undefined) {
-                this._viewHostScreens.set(node.id, hostScreenId);
-                this._viewOrder.set(node.id, nextViewOrder++);
-
                 if (node.type === "view") {
                     if (slotKey === undefined) {
                         throw new Error(`No slot for view: ${node.id}`);
                     }
 
-                    this._viewSlots.set(node.id, slotKey);
+                    const scopedViewKey = this.createScopedViewKey(hostScreenId, node.id);
+                    if (this._viewSlots.has(scopedViewKey)) {
+                        throw new Error(`Duplicate view id: ${node.id} in screen: ${hostScreenId}`);
+                    }
+
+                    this._viewSlots.set(scopedViewKey, slotKey);
+                    this._viewOrder.set(scopedViewKey, nextViewOrder++);
+
                     let viewIdsBySlot = this._viewIdsByHostSlot.get(hostScreenId);
                     if (viewIdsBySlot === undefined) {
                         viewIdsBySlot = new Map<SlotKey, GuicosId[]>();
@@ -271,16 +276,11 @@ export class GuicosHierarchy {
     }
 
     public getScreen(screenId: GuicosId): ScreenHierarchyNode {
-        if (!this._lookup.has(screenId)) {
+        if (!this._screenLookup.has(screenId)) {
             throw new Error(`No screen with id: ${screenId} in hierarchy`);
         }
 
-        const node = this._lookup.get(screenId)!;
-        if (node.type !== "screen") {
-            throw new Error(`Node with id in hierarchy: ${screenId} is ${node.type} not a screen`);
-        }
-
-        return node;
+        return this._screenLookup.get(screenId)!;
     }
 
     public getDirectChild(parentScreenId: GuicosId, childId: GuicosId): ScreenHierarchyNode | ViewHierarchyNode {
@@ -315,15 +315,6 @@ export class GuicosHierarchy {
         return child;
     }
 
-    public getHostScreenId(viewId: GuicosId): GuicosId {
-        const hostScreenId = this._viewHostScreens.get(viewId);
-        if (hostScreenId === undefined) {
-            throw new Error(`No view with id: ${viewId} in hierarchy`);
-        }
-
-        return hostScreenId;
-    }
-
     public getParentScreenId(screenId: GuicosId): GuicosId | null {
         if (screenId === this.rootId) {
             return null;
@@ -356,20 +347,13 @@ export class GuicosHierarchy {
         return screenIds.filter(siblingScreenId => siblingScreenId !== screenId);
     }
 
-    public getSameSlotSiblingViewIds(viewId: GuicosId): GuicosId[] {
-        const node = this._lookup.get(viewId);
-        if (node === undefined) {
-            throw new Error(`No view with id: ${viewId} in hierarchy`);
-        }
+    public getSameSlotSiblingViewIds(hostScreenId: GuicosId, viewId: GuicosId): GuicosId[] {
+        this.getDirectChildView(hostScreenId, viewId);
 
-        if (node.type !== "view") {
-            throw new Error(`Node with id in hierarchy: ${viewId} is ${node.type} not a view`);
-        }
-
-        const hostScreenId = this.getHostScreenId(viewId);
-        const slotKey = this._viewSlots.get(viewId);
+        const scopedViewKey = this.createScopedViewKey(hostScreenId, viewId);
+        const slotKey = this._viewSlots.get(scopedViewKey);
         if (slotKey === undefined) {
-            throw new Error(`No slot for view id: ${viewId}`);
+            throw new Error(`No slot for view id: ${viewId} in screen: ${hostScreenId}`);
         }
 
         const viewIdsBySlot = this._viewIdsByHostSlot.get(hostScreenId);
@@ -394,12 +378,16 @@ export class GuicosHierarchy {
         return false;
     }
 
-    public getViewOrder(viewId: GuicosId): number {
-        const viewOrder = this._viewOrder.get(viewId);
+    public getViewOrder(hostScreenId: GuicosId, viewId: GuicosId): number {
+        const viewOrder = this._viewOrder.get(this.createScopedViewKey(hostScreenId, viewId));
         if (viewOrder === undefined) {
-            throw new Error(`No view with id: ${viewId} in hierarchy`);
+            throw new Error(`No view with id: ${viewId} in screen: ${hostScreenId}`);
         }
 
         return viewOrder;
+    }
+
+    private createScopedViewKey(hostScreenId: GuicosId, viewId: GuicosId): ScopedViewKey {
+        return `${hostScreenId}::${viewId}`;
     }
 }

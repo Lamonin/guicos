@@ -58,7 +58,10 @@ export class GuicosWidgetsRegistry {
             if (this.resourceManager === null) {
                 throw new Error(`Resource manager is not assigned for widget id: ${id}`);
             }
+
+            this.logger.log(`[GuicosWidgetsRegistry] Loading resource widget prefab. id: ${id}, path: ${resourceData.path}`);
             const prefab = await this.resourceManager.load(resourceData.path, Prefab);
+            this.logger.log(`[GuicosWidgetsRegistry] Loaded resource widget prefab. id: ${id}, path: ${resourceData.path}`);
             this.cache.set(id, prefab);
             return prefab;
         }

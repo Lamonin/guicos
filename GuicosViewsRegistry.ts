@@ -38,7 +38,11 @@ export class GuicosViewsRegistry {
         this.resourcesRegistry = resourcesRegistry;
     }
 
-    public async getOrCreateView(viewId: GuicosId, viewCtor: GuicosViewCtor = null): Promise<GuicosView<any>> {
+    public async getOrCreateView(
+        viewId: GuicosId,
+        viewCtor: GuicosViewCtor = null,
+        registryViewId: GuicosId = viewId,
+    ): Promise<GuicosView<any>> {
         const cachedView = this._viewsCache.get(viewId);
         if (cachedView !== undefined) {
             if (isValid(cachedView, true) && isValid(cachedView.node, true)) {
@@ -48,8 +52,8 @@ export class GuicosViewsRegistry {
             this._viewsCache.delete(viewId);
         }
 
-        const prefab = await this.getPrefab(viewId);
-        const view = this.createView(viewId, prefab, viewCtor);
+        const prefab = await this.getPrefab(registryViewId);
+        const view = this.createView(registryViewId, prefab, viewCtor);
         this._viewsCache.set(viewId, view);
         return view;
     }
