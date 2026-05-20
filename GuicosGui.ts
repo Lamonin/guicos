@@ -327,6 +327,8 @@ export class GuicosGui {
     }
 
     private attachOpenedView(scopedViewKey: ScopedViewKey, view: RuntimeView): void {
+        this.pruneOpenedViews();
+        this.detachOpenedView(scopedViewKey);
         const insertionIndex = this.findOpenedViewInsertionIndex(view.hostScreenId, view.viewId);
         this._openedViews.set(scopedViewKey, view);
         this._openedViewKeysByOrder.splice(insertionIndex, 0, scopedViewKey);
@@ -334,9 +336,20 @@ export class GuicosGui {
     }
 
     private async closeViewsForScreen(screenId: GuicosId): Promise<void> {
-        const viewKeysToClose = [...this._openedViews.entries()]
-            .filter(([, view]) => view.hostScreenId === screenId)
-            .map(([scopedViewKey]) => scopedViewKey);
+        this.pruneOpenedViews();
+        const viewKeysToClose: ScopedViewKey[] = [];
+
+        for (const [scopedViewKey, view] of this._openedViews.entries()) {
+            if (view === undefined) {
+                this.detachOpenedView(scopedViewKey);
+                this._openedViews.delete(scopedViewKey);
+                continue;
+            }
+
+            if (view.hostScreenId === screenId) {
+                viewKeysToClose.push(scopedViewKey);
+            }
+        }
 
         for (const scopedViewKey of viewKeysToClose) {
             const view = this._openedViews.get(scopedViewKey);
@@ -413,6 +426,27 @@ export class GuicosGui {
         }
 
         return left;
+    }
+
+    private pruneOpenedViews(): void {
+        for (let index = this._openedViewKeysByOrder.length - 1; index >= 0; index--) {
+            const scopedViewKey = this._openedViewKeysByOrder[index];
+            const view = this._openedViews.get(scopedViewKey);
+            if (view !== undefined && this.isViewAlive(view)) {
+                continue;
+            }
+
+            this._openedViews.delete(scopedViewKey);
+            this._openedViewKeysByOrder.splice(index, 1);
+        }
+
+        for (const [scopedViewKey, view] of this._openedViews.entries()) {
+            if (view !== undefined && this.isViewAlive(view)) {
+                continue;
+            }
+
+            this._openedViews.delete(scopedViewKey);
+        }
     }
 
     private findOpenedViewIndex(scopedViewKey: ScopedViewKey): number {
