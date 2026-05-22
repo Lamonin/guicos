@@ -9,6 +9,7 @@ import {
 } from "./GuicosEventSubscription";
 import type { IGuicosGuiFacade } from "./GuicosGuiFacade";
 import { GuicosId } from "./GuicosId";
+import { GuicosScreenLifecycleState } from "./GuicosLifecycle";
 import { GUICOS_NOOP_LOGGER } from "./GuicosLogger";
 
 export interface IGuicosScreen {
@@ -23,6 +24,7 @@ export interface IGuicosScreen {
 export abstract class GuicosScreen<TContext, TExtendedContext extends TContext> implements IGuicosScreen, IReceiveContext<TContext>, IProvideContext<TExtendedContext> {
     public __gui!: IGuicosGuiFacade;
     private _screenId!: GuicosId;
+    private _lifecycleState: GuicosScreenLifecycleState = "created";
     private readonly _eventSubscriptions = new Map<GuicosEventCtor<GuicosEvent>, GuicosEventSubscription<GuicosEvent>>();
 
     public get gui(): IGuicosGuiFacade {
@@ -32,10 +34,15 @@ export abstract class GuicosScreen<TContext, TExtendedContext extends TContext> 
     private _context!: TExtendedContext;
     protected get context(): TExtendedContext { return this._context; }
     public get __screenId(): GuicosId { return this._screenId; }
+    public get lifecycleState(): GuicosScreenLifecycleState { return this._lifecycleState; }
 
     public __bindRuntime(screenId: GuicosId, gui: IGuicosGuiFacade): void {
         this._screenId = screenId;
         this.__gui = gui;
+    }
+
+    public __setLifecycleState(state: GuicosScreenLifecycleState): void {
+        this._lifecycleState = state;
     }
 
     /**

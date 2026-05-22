@@ -25,6 +25,7 @@ export abstract class GuicosResourceViewRegistryData {
 
 export class GuicosViewsRegistry {
     private readonly _viewsCache: Map<GuicosId, GuicosView<any>> = new Map<GuicosId, GuicosView<any>>();
+    private readonly _pendingViews: Map<GuicosId, Promise<GuicosView<any>>> = new Map<GuicosId, Promise<GuicosView<any>>>();
     private readonly prefabsRegistry: GuicosPrefabViewRegistryData[] = null;
     private readonly resourcesRegistry: GuicosResourceViewRegistryData[] = null;
 
@@ -50,12 +51,34 @@ export class GuicosViewsRegistry {
             }
 
             this._viewsCache.delete(viewId);
+            throw new Error(`Cached view was destroyed outside Guicos lifecycle: ${viewId}`);
         }
 
-        const prefab = await this.getPrefab(registryViewId);
-        const view = this.createView(registryViewId, prefab, viewCtor);
-        this._viewsCache.set(viewId, view);
-        return view;
+        const pendingView = this._pendingViews.get(viewId);
+        if (pendingView !== undefined) {
+            return await pendingView;
+        }
+
+        const viewPromise = this.createAndCacheView(viewId, viewCtor, registryViewId);
+        this._pendingViews.set(viewId, viewPromise);
+
+        try {
+            return await viewPromise;
+        } finally {
+            this._pendingViews.delete(viewId);
+        }
+    }
+
+    public destroyView(viewId: GuicosId): void {
+        const view = this._viewsCache.get(viewId);
+        this._viewsCache.delete(viewId);
+
+        if (view === undefined || !isValid(view, true) || !isValid(view.node, true)) {
+            return;
+        }
+
+        view.node.removeFromParent();
+        view.node.destroy();
     }
 
     public async getPrefab(id: GuicosId): Promise<Prefab> {
@@ -95,6 +118,17 @@ export class GuicosViewsRegistry {
             throw new Error(`View prefab must contain ${componentName} component: ${viewId}`);
         }
 
+        return view;
+    }
+
+    private async createAndCacheView(
+        viewId: GuicosId,
+        viewCtor: GuicosViewCtor,
+        registryViewId: GuicosId,
+    ): Promise<GuicosView<any>> {
+        const prefab = await this.getPrefab(registryViewId);
+        const view = this.createView(registryViewId, prefab, viewCtor);
+        this._viewsCache.set(viewId, view);
         return view;
     }
 

@@ -4,6 +4,7 @@ import { GuicosEvent } from "./GuicosEvent";
 import { GuicosGuiFacade, IGuicosGuiFacade } from "./GuicosGuiFacade";
 import { GuicosHierarchy, ScreenHierarchyNode } from "./GuicosHierarchyRegistry";
 import { GuicosId } from "./GuicosId";
+import { GuicosLifecycleScope, GuicosViewLifecycleState } from "./GuicosLifecycle";
 import { GUICOS_NOOP_LOGGER, IGuicosLogger } from "./GuicosLogger";
 import { IGuicosScreen } from "./GuicosScreen";
 import { GuicosView } from "./GuicosView";
@@ -13,16 +14,32 @@ import { GuicosWidgetsRegistry } from "./GuicosWidgetsRegistry";
 type RuntimeScreen = IGuicosScreen & IReceiveContext<any> & IProvideContext<any> & {
     readonly __screenId: GuicosId;
     __bindRuntime(screenId: GuicosId, gui: IGuicosGuiFacade): void;
+    __setLifecycleState(state: "created" | "mounting" | "mounted" | "unmounting" | "disposed"): void;
     handleEvent(event: GuicosEvent): Promise<boolean>;
     __clearEventSubscriptions(): void;
 };
 
 type RuntimeView = GuicosView<any> & IReceiveContext<any> & {
-    readonly __hostScreenId: GuicosId;
     __bindRuntime(viewId: GuicosId, hostScreenId: GuicosId, gui: IGuicosGuiFacade): void;
+    __setLifecycleState(state: GuicosViewLifecycleState): void;
+    __bindMountScope(scope: GuicosLifecycleScope): void;
+    __clearMountScope(): void;
+    __bindVisibleScope(scope: GuicosLifecycleScope): void;
+    __clearVisibleScope(): void;
 };
 
 type ScopedViewKey = string;
+
+interface GuicosViewRecord {
+    readonly key: ScopedViewKey;
+    readonly viewId: GuicosId;
+    readonly hostScreenId: GuicosId;
+    readonly view: RuntimeView;
+    state: GuicosViewLifecycleState;
+    revision: number;
+    mountScope: GuicosLifecycleScope | null;
+    visibleScope: GuicosLifecycleScope | null;
+}
 
 export class GuicosGui {
     private readonly _rootNode: Node;
@@ -32,7 +49,7 @@ export class GuicosGui {
 
     private readonly _historyStack: RuntimeScreen[] = [];
     private readonly _screenInstances: Map<GuicosId, RuntimeScreen> = new Map<GuicosId, RuntimeScreen>();
-    private readonly _openedViews: Map<ScopedViewKey, RuntimeView> = new Map<ScopedViewKey, RuntimeView>();
+    private readonly _viewRecords: Map<ScopedViewKey, GuicosViewRecord> = new Map<ScopedViewKey, GuicosViewRecord>();
     private readonly _openedViewKeysByOrder: ScopedViewKey[] = [];
     private _transitionDepth = 0;
     private _transitionQueue: Promise<void> = Promise.resolve();
@@ -55,12 +72,13 @@ export class GuicosGui {
             const rootScreen = this.createScreenInstance(this._hierarchy.getScreen(this._hierarchy.rootId));
             await rootScreen.setContext(context);
             this._historyStack.push(rootScreen);
+            rootScreen.__setLifecycleState("mounting");
             await rootScreen.mount();
+            rootScreen.__setLifecycleState("mounted");
         });
     }
 
     public async openScreen(screenId: GuicosId, contextOverride?: any): Promise<void> {
-        // In case start not called first
         if (this._historyStack.length === 0) {
             if (screenId !== this._hierarchy.rootId) {
                 throw new Error(`Cannot open screen: ${screenId} without an active parent screen`);
@@ -92,7 +110,9 @@ export class GuicosGui {
             const screenInstance = this.createScreenInstance(childScreen);
             await screenInstance.setContext(childContext);
             this._historyStack.push(screenInstance);
+            screenInstance.__setLifecycleState("mounting");
             await screenInstance.mount();
+            screenInstance.__setLifecycleState("mounted");
         });
     }
 
@@ -123,36 +143,44 @@ export class GuicosGui {
         await this.runTransition(async () => {
             const parentScreen = this.getScreenContextSource(parentScreenId);
             const childView = this._hierarchy.getDirectChildView(parentScreenId, viewId);
-            const scopedViewKey = this.createScopedViewKey(parentScreenId, viewId);
-            const view = await this.getOrCreateRuntimeView(childView.id, childView.ctor, parentScreenId);
+            const record = await this.getOrCreateViewRecord(
+                this.createScopedViewKey(parentScreenId, viewId),
+                childView.id,
+                childView.ctor as new (...args: any[]) => GuicosView<any>,
+                parentScreenId,
+            );
+            const revision = this.beginViewOperation(record);
+
+            if (await this.shouldAbortViewOpen(record, revision)) {
+                return;
+            }
+
             const childContext = contextOverride !== undefined
                 ? contextOverride
                 : await parentScreen.getExtendedContext();
 
-            await view.setContext(childContext);
-            const openedView = this._openedViews.get(scopedViewKey);
-            if (openedView !== undefined) {
-                if (this.isViewMounted(openedView)) {
-                    if (!openedView.node.active) {
-                        openedView.node.active = true;
-                        await openedView.show();
-                    }
-
-                    return;
-                }
-
-                this._openedViews.delete(scopedViewKey);
-                this.detachOpenedView(scopedViewKey);
+            if (await this.shouldAbortViewOpen(record, revision)) {
+                return;
             }
 
-            if (view.node.parent !== this._rootNode) {
-                this._rootNode.addChild(view.node);
+            await record.view.setContext(childContext);
+
+            if (await this.shouldAbortViewOpen(record, revision)) {
+                return;
             }
 
-            await view.mount();
-            view.node.active = true;
-            this.attachOpenedView(scopedViewKey, view);
-            await view.show();
+            await this.ensureViewMounted(record, revision);
+
+            if (await this.shouldAbortViewOpen(record, revision)) {
+                return;
+            }
+
+            await this.showViewRecord(record, revision);
+
+            if (await this.shouldAbortViewOpen(record, revision)) {
+                return;
+            }
+
             await this.closeSameSlotSiblingViews(parentScreenId, viewId);
         });
     }
@@ -166,22 +194,16 @@ export class GuicosGui {
             this._hierarchy.getDirectChildView(parentScreenId, viewId);
             const scopedViewKey = this.createScopedViewKey(parentScreenId, viewId);
 
-            const view = this._openedViews.get(scopedViewKey);
-            if (view === undefined) {
+            const record = this._viewRecords.get(scopedViewKey);
+            if (record === undefined) {
                 return;
             }
 
-            if (view.hostScreenId !== parentScreenId) {
-                throw new Error(`View with id: ${viewId} belongs to screen: ${view.hostScreenId}, not: ${parentScreenId}`);
+            if (record.hostScreenId !== parentScreenId) {
+                throw new Error(`View with id: ${viewId} belongs to screen: ${record.hostScreenId}, not: ${parentScreenId}`);
             }
 
-            if (!this.isViewMounted(view)) {
-                this._openedViews.delete(scopedViewKey);
-                this.detachOpenedView(scopedViewKey);
-                return;
-            }
-
-            await this.closeMountedView(scopedViewKey, view);
+            await this.hideViewRecord(record);
         });
     }
 
@@ -234,6 +256,10 @@ export class GuicosGui {
         return parentScreen;
     }
 
+    private isScreenInstantiated(screenId: GuicosId): boolean {
+        return this._screenInstances.has(screenId);
+    }
+
     private createScreenInstance(screenNode: ScreenHierarchyNode): RuntimeScreen {
         const screenInstance = new screenNode.ctor() as RuntimeScreen;
         this._screenInstances.set(screenNode.id, screenInstance);
@@ -241,6 +267,7 @@ export class GuicosGui {
             screenNode.id,
             this.createFacade(screenNode.id, this._hierarchy.getParentScreenId(screenNode.id)),
         );
+        screenInstance.__setLifecycleState("created");
         return screenInstance;
     }
 
@@ -259,12 +286,12 @@ export class GuicosGui {
         const siblingViewIds = this._hierarchy.getSameSlotSiblingViewIds(hostScreenId, viewId);
         for (const siblingViewId of siblingViewIds) {
             const scopedSiblingViewKey = this.createScopedViewKey(hostScreenId, siblingViewId);
-            const siblingView = this._openedViews.get(scopedSiblingViewKey);
-            if (siblingView === undefined) {
+            const siblingRecord = this._viewRecords.get(scopedSiblingViewKey);
+            if (siblingRecord === undefined) {
                 continue;
             }
 
-            await this.closeMountedView(scopedSiblingViewKey, siblingView);
+            await this.hideViewRecord(siblingRecord);
         }
     }
 
@@ -288,9 +315,12 @@ export class GuicosGui {
             return;
         }
 
+        screen.__setLifecycleState("unmounting");
         await this.closeViewsForScreen(screenId);
+        await this.destroyCachedViewsForScreen(screenId);
         await screen.unmount();
         screen.__clearEventSubscriptions();
+        screen.__setLifecycleState("disposed");
         this._screenInstances.delete(screenId);
 
         const stackIndex = this._historyStack.findIndex(s => s.__screenId === screenId);
@@ -299,11 +329,196 @@ export class GuicosGui {
         }
     }
 
-    private async getOrCreateRuntimeView(viewId: GuicosId, viewCtor: new (...args: any[]) => GuicosView<any>, parentScreenId: GuicosId): Promise<RuntimeView> {
-        const scopedViewId = this.createScopedViewKey(parentScreenId, viewId);
-        const view = await this._viewsRegistry.getOrCreateView(scopedViewId, viewCtor, viewId) as RuntimeView;
+    private async getOrCreateViewRecord(
+        scopedViewKey: ScopedViewKey,
+        viewId: GuicosId,
+        viewCtor: new (...args: any[]) => GuicosView<any>,
+        parentScreenId: GuicosId,
+    ): Promise<GuicosViewRecord> {
+        const cachedRecord = this._viewRecords.get(scopedViewKey);
+        if (cachedRecord !== undefined && cachedRecord.state !== "disposed" && this.isViewAlive(cachedRecord.view)) {
+            return cachedRecord;
+        }
+
+        if (cachedRecord !== undefined) {
+            this._viewRecords.delete(scopedViewKey);
+            this.detachOpenedView(scopedViewKey);
+        }
+
+        const view = await this._viewsRegistry.getOrCreateView(scopedViewKey, viewCtor, viewId) as RuntimeView;
         view.__bindRuntime(viewId, parentScreenId, this.createFacade(parentScreenId, parentScreenId));
-        return view;
+
+        const record: GuicosViewRecord = {
+            key: scopedViewKey,
+            viewId,
+            hostScreenId: parentScreenId,
+            view,
+            state: "loading",
+            revision: 0,
+            mountScope: null,
+            visibleScope: null,
+        };
+        record.view.__setLifecycleState(record.state);
+        this._viewRecords.set(scopedViewKey, record);
+        return record;
+    }
+
+    private beginViewOperation(record: GuicosViewRecord): number {
+        record.revision++;
+        return record.revision;
+    }
+
+    private async shouldAbortViewOpen(record: GuicosViewRecord, revision: number): Promise<boolean> {
+        if (!this.isViewAlive(record.view) || !this.isScreenInstantiated(record.hostScreenId)) {
+            await this.disposeViewRecord(record);
+            return true;
+        }
+
+        return record.revision !== revision || record.state === "disposing" || record.state === "disposed";
+    }
+
+    private async ensureViewMounted(record: GuicosViewRecord, revision: number): Promise<void> {
+        if (record.state !== "loading") {
+            if (record.view.node.parent !== this._rootNode) {
+                this._rootNode.addChild(record.view.node);
+            }
+            return;
+        }
+
+        if (record.view.node.parent !== this._rootNode) {
+            this._rootNode.addChild(record.view.node);
+        }
+
+        record.mountScope = new GuicosLifecycleScope(`${record.key}:mount`);
+        record.view.__bindMountScope(record.mountScope);
+        record.state = "mounted";
+        record.view.__setLifecycleState(record.state);
+        await record.view.mount();
+
+        if (record.revision !== revision || !this.isScreenInstantiated(record.hostScreenId)) {
+            return;
+        }
+
+        record.state = "mounted";
+        record.view.__setLifecycleState(record.state);
+    }
+
+    private async showViewRecord(record: GuicosViewRecord, revision: number): Promise<void> {
+        if (record.state === "visible") {
+            this.attachOpenedView(record);
+            return;
+        }
+
+        if (record.state === "showing") {
+            return;
+        }
+
+        if (record.view.node.parent !== this._rootNode) {
+            this._rootNode.addChild(record.view.node);
+        }
+
+        record.visibleScope = new GuicosLifecycleScope(`${record.key}:visible:${revision}`);
+        record.view.__bindVisibleScope(record.visibleScope);
+        record.state = "showing";
+        record.view.__setLifecycleState(record.state);
+        record.view.node.active = true;
+        this.attachOpenedView(record);
+
+        await record.view.show();
+
+        if (record.revision !== revision) {
+            return;
+        }
+
+        record.state = "visible";
+        record.view.__setLifecycleState(record.state);
+    }
+
+    private async hideViewRecord(record: GuicosViewRecord): Promise<void> {
+        if (record.state === "hidden" || record.state === "loading" || record.state === "disposed" || record.state === "disposing") {
+            this.detachOpenedView(record.key);
+            return;
+        }
+
+        const revision = ++record.revision;
+        record.state = "hiding";
+        record.view.__setLifecycleState(record.state);
+
+        try {
+            await this.disposeVisibleScope(record);
+
+            if (this.isViewAlive(record.view)) {
+                await record.view.hide();
+            }
+
+            if (record.revision === revision && this.isViewAlive(record.view)) {
+                record.view.node.active = false;
+                record.view.node.removeFromParent();
+            }
+        } finally {
+            if (record.revision === revision) {
+                this.detachOpenedView(record.key);
+            }
+
+            if (record.revision === revision) {
+                record.state = "hidden";
+                record.view.__setLifecycleState(record.state);
+            }
+        }
+    }
+
+    private async disposeViewRecord(record: GuicosViewRecord): Promise<void> {
+        if (record.state === "disposed" || record.state === "disposing") {
+            return;
+        }
+
+        record.revision++;
+
+        if (record.state === "showing" || record.state === "visible" || record.state === "hiding") {
+            await this.hideViewRecord(record);
+        }
+
+        const shouldUnmount = record.mountScope !== null && record.state !== "loading";
+        record.state = "disposing";
+        record.view.__setLifecycleState(record.state);
+
+        try {
+            await this.disposeVisibleScope(record);
+
+            try {
+                if (shouldUnmount && this.isViewAlive(record.view)) {
+                    await record.view.unmount();
+                }
+            } finally {
+                await this.disposeMountScope(record);
+            }
+        } finally {
+            this.detachOpenedView(record.key);
+            this._viewRecords.delete(record.key);
+            this._viewsRegistry.destroyView(record.key);
+            record.state = "disposed";
+            record.view.__setLifecycleState(record.state);
+        }
+    }
+
+    private async disposeVisibleScope(record: GuicosViewRecord): Promise<void> {
+        const visibleScope = record.visibleScope;
+        record.visibleScope = null;
+        record.view.__clearVisibleScope();
+
+        if (visibleScope !== null) {
+            await visibleScope.dispose();
+        }
+    }
+
+    private async disposeMountScope(record: GuicosViewRecord): Promise<void> {
+        const mountScope = record.mountScope;
+        record.mountScope = null;
+        record.view.__clearMountScope();
+
+        if (mountScope !== null) {
+            await mountScope.dispose();
+        }
     }
 
     private async runTransition(operation: () => Promise<void>): Promise<void> {
@@ -326,74 +541,31 @@ export class GuicosGui {
         }
     }
 
-    private attachOpenedView(scopedViewKey: ScopedViewKey, view: RuntimeView): void {
+    private attachOpenedView(record: GuicosViewRecord): void {
         this.pruneOpenedViews();
-        this.detachOpenedView(scopedViewKey);
-        const insertionIndex = this.findOpenedViewInsertionIndex(view.hostScreenId, view.viewId);
-        this._openedViews.set(scopedViewKey, view);
-        this._openedViewKeysByOrder.splice(insertionIndex, 0, scopedViewKey);
-        view.node.setSiblingIndex(insertionIndex);
+        this.detachOpenedView(record.key);
+        const insertionIndex = this.findOpenedViewInsertionIndex(record.hostScreenId, record.viewId);
+        this._openedViewKeysByOrder.splice(insertionIndex, 0, record.key);
+        record.view.node.setSiblingIndex(insertionIndex);
     }
 
     private async closeViewsForScreen(screenId: GuicosId): Promise<void> {
         this.pruneOpenedViews();
-        const viewKeysToClose: ScopedViewKey[] = [];
+        const recordsToClose: GuicosViewRecord[] = [];
 
-        for (const [scopedViewKey, view] of this._openedViews.entries()) {
-            if (view === undefined) {
-                this.detachOpenedView(scopedViewKey);
-                this._openedViews.delete(scopedViewKey);
-                continue;
-            }
-
-            if (view.hostScreenId === screenId) {
-                viewKeysToClose.push(scopedViewKey);
+        for (const record of this._viewRecords.values()) {
+            if (record.hostScreenId === screenId) {
+                recordsToClose.push(record);
             }
         }
 
-        for (const scopedViewKey of viewKeysToClose) {
-            const view = this._openedViews.get(scopedViewKey);
-            if (view === undefined) {
-                continue;
-            }
-
-            await this.closeMountedView(scopedViewKey, view);
-        }
-    }
-
-    private async closeMountedView(scopedViewKey: ScopedViewKey, view: RuntimeView): Promise<void> {
-        try {
-            if (!this.isViewAlive(view)) {
-                return;
-            }
-
-            await view.hide();
-
-            if (!this.isViewAlive(view)) {
-                return;
-            }
-
-            // TODO call unmount only when view destroyed
-            await view.unmount();
-
-            if (!this.isViewAlive(view)) {
-                return;
-            }
-
-            view.node.active = false;
-            view.node.removeFromParent();
-        } finally {
-            this._openedViews.delete(scopedViewKey);
-            this.detachOpenedView(scopedViewKey);
+        for (const record of recordsToClose) {
+            await this.hideViewRecord(record);
         }
     }
 
     private isViewAlive(view: RuntimeView): boolean {
         return isValid(view, true) && isValid(view.node, true);
-    }
-
-    private isViewMounted(view: RuntimeView): boolean {
-        return this.isViewAlive(view) && view.node.parent === this._rootNode;
     }
 
     private detachOpenedView(scopedViewKey: ScopedViewKey): void {
@@ -412,12 +584,12 @@ export class GuicosGui {
 
         while (left < right) {
             const middle = Math.floor((left + right) / 2);
-            const currentView = this._openedViews.get(this._openedViewKeysByOrder[middle]);
-            if (currentView === undefined) {
+            const currentRecord = this._viewRecords.get(this._openedViewKeysByOrder[middle]);
+            if (currentRecord === undefined) {
                 break;
             }
 
-            const currentOrder = this._hierarchy.getViewOrder(currentView.hostScreenId, currentView.viewId);
+            const currentOrder = this._hierarchy.getViewOrder(currentRecord.hostScreenId, currentRecord.viewId);
             if (currentOrder < targetOrder) {
                 left = middle + 1;
             } else {
@@ -431,21 +603,27 @@ export class GuicosGui {
     private pruneOpenedViews(): void {
         for (let index = this._openedViewKeysByOrder.length - 1; index >= 0; index--) {
             const scopedViewKey = this._openedViewKeysByOrder[index];
-            const view = this._openedViews.get(scopedViewKey);
-            if (view !== undefined && this.isViewAlive(view)) {
+            const record = this._viewRecords.get(scopedViewKey);
+            if (record !== undefined && this.isViewAlive(record.view) && (record.state === "showing" || record.state === "visible")) {
                 continue;
             }
 
-            this._openedViews.delete(scopedViewKey);
             this._openedViewKeysByOrder.splice(index, 1);
         }
+    }
 
-        for (const [scopedViewKey, view] of this._openedViews.entries()) {
-            if (view !== undefined && this.isViewAlive(view)) {
+    private async destroyCachedViewsForScreen(screenId: GuicosId): Promise<void> {
+        const viewIds = this._hierarchy.getDirectChildViewIds(screenId);
+        for (const viewId of viewIds) {
+            const scopedViewKey = this.createScopedViewKey(screenId, viewId);
+            const record = this._viewRecords.get(scopedViewKey);
+            if (record !== undefined) {
+                await this.disposeViewRecord(record);
                 continue;
             }
 
-            this._openedViews.delete(scopedViewKey);
+            this.detachOpenedView(scopedViewKey);
+            this._viewsRegistry.destroyView(scopedViewKey);
         }
     }
 

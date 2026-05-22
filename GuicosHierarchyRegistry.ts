@@ -362,6 +362,22 @@ export class GuicosHierarchy {
         return viewIds.filter(siblingViewId => siblingViewId !== viewId);
     }
 
+    public getDirectChildViewIds(hostScreenId: GuicosId): GuicosId[] {
+        this.getScreen(hostScreenId);
+
+        const viewIdsBySlot = this._viewIdsByHostSlot.get(hostScreenId);
+        if (viewIdsBySlot === undefined) {
+            return [];
+        }
+
+        const viewIds: GuicosId[] = [];
+        for (const slotViewIds of viewIdsBySlot.values()) {
+            viewIds.push(...slotViewIds);
+        }
+
+        return viewIds;
+    }
+
     public isScreenDescendantOf(screenId: GuicosId, ancestorScreenId: GuicosId): boolean {
         this.getScreen(screenId);
         this.getScreen(ancestorScreenId);
