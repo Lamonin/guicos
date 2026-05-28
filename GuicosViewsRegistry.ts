@@ -26,6 +26,8 @@ export abstract class GuicosResourceViewRegistryData {
 export class GuicosViewsRegistry {
     private readonly _viewsCache: Map<GuicosId, GuicosView<any>> = new Map<GuicosId, GuicosView<any>>();
     private readonly _pendingViews: Map<GuicosId, Promise<GuicosView<any>>> = new Map<GuicosId, Promise<GuicosView<any>>>();
+    private readonly _prefabCache: Map<GuicosId, Prefab> = new Map<GuicosId, Prefab>();
+    private readonly _pendingPrefabs: Map<GuicosId, Promise<Prefab>> = new Map<GuicosId, Promise<Prefab>>();
     private readonly prefabsRegistry: GuicosPrefabViewRegistryData[] = null;
     private readonly resourcesRegistry: GuicosResourceViewRegistryData[] = null;
 
@@ -81,7 +83,38 @@ export class GuicosViewsRegistry {
         view.node.destroy();
     }
 
+    public async preloadView(registryViewId: GuicosId): Promise<void> {
+        await this.getPrefab(registryViewId);
+    }
+
     public async getPrefab(id: GuicosId): Promise<Prefab> {
+        const cachedPrefab = this._prefabCache.get(id);
+        if (cachedPrefab !== undefined) {
+            if (isValid(cachedPrefab, true)) {
+                return cachedPrefab;
+            }
+
+            this._prefabCache.delete(id);
+        }
+
+        const pendingPrefab = this._pendingPrefabs.get(id);
+        if (pendingPrefab !== undefined) {
+            return await pendingPrefab;
+        }
+
+        const prefabPromise = this.loadPrefab(id);
+        this._pendingPrefabs.set(id, prefabPromise);
+
+        try {
+            const prefab = await prefabPromise;
+            this._prefabCache.set(id, prefab);
+            return prefab;
+        } finally {
+            this._pendingPrefabs.delete(id);
+        }
+    }
+
+    private async loadPrefab(id: GuicosId): Promise<Prefab> {
         const prefabData = (this.prefabsRegistry ?? []).find((entry) => entry.id === id);
         if (prefabData === undefined) {
             const resourceData = (this.resourcesRegistry ?? []).find((entry) => entry.id === id);

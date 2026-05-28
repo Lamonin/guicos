@@ -29,6 +29,7 @@ type RuntimeView = GuicosView<any> & IReceiveContext<any> & {
 };
 
 type ScopedViewKey = string;
+const BACKGROUND_PRELOAD_CONCURRENCY = 2;
 
 interface GuicosViewRecord {
     readonly key: ScopedViewKey;
@@ -53,6 +54,7 @@ export class GuicosGui {
     private readonly _openedViewKeysByOrder: ScopedViewKey[] = [];
     private _transitionDepth = 0;
     private _transitionQueue: Promise<void> = Promise.resolve();
+    private _backgroundPreloadPromise: Promise<void> | null = null;
 
     constructor(
         rootNode: Node,
@@ -69,6 +71,7 @@ export class GuicosGui {
 
     public async start<TContext>(context: TContext): Promise<void> {
         await this.runTransition(async () => {
+            await this.preloadBlockingViews(this._hierarchy.rootId);
             const rootScreen = this.createScreenInstance(this._hierarchy.getScreen(this._hierarchy.rootId));
             await rootScreen.setContext(context);
             this._historyStack.push(rootScreen);
@@ -76,6 +79,8 @@ export class GuicosGui {
             await rootScreen.mount();
             rootScreen.__setLifecycleState("mounted");
         });
+
+        this.startBackgroundPreload();
     }
 
     public async openScreen(screenId: GuicosId, contextOverride?: any): Promise<void> {
@@ -106,6 +111,8 @@ export class GuicosGui {
                 await openedScreen.setContext(childContext);
                 return;
             }
+
+            await this.preloadBlockingViews(screenId);
 
             const screenInstance = this.createScreenInstance(childScreen);
             await screenInstance.setContext(childContext);
@@ -203,7 +210,7 @@ export class GuicosGui {
                 throw new Error(`View with id: ${viewId} belongs to screen: ${record.hostScreenId}, not: ${parentScreenId}`);
             }
 
-            await this.hideViewRecord(record);
+            await this.closeViewRecord(record);
         });
     }
 
@@ -291,7 +298,7 @@ export class GuicosGui {
                 continue;
             }
 
-            await this.hideViewRecord(siblingRecord);
+            await this.closeViewRecord(siblingRecord);
         }
     }
 
@@ -467,6 +474,14 @@ export class GuicosGui {
         }
     }
 
+    private async closeViewRecord(record: GuicosViewRecord): Promise<void> {
+        await this.hideViewRecord(record);
+
+        if (this._hierarchy.getViewDisposePolicy(record.hostScreenId, record.viewId) === "disposeOnClose") {
+            await this.disposeViewRecord(record);
+        }
+    }
+
     private async disposeViewRecord(record: GuicosViewRecord): Promise<void> {
         if (record.state === "disposed" || record.state === "disposing") {
             return;
@@ -539,6 +554,46 @@ export class GuicosGui {
         } finally {
             this._transitionDepth--;
         }
+    }
+
+    private async preloadBlockingViews(screenId: GuicosId): Promise<void> {
+        const viewIds = this._hierarchy.getBlockingPreloadViewIds(screenId);
+        if (viewIds.length === 0) {
+            return;
+        }
+
+        await Promise.all(viewIds.map(viewId => this._viewsRegistry.preloadView(viewId)));
+    }
+
+    private startBackgroundPreload(): void {
+        if (this._backgroundPreloadPromise !== null) {
+            return;
+        }
+
+        const viewIds = this._hierarchy.getBackgroundPreloadViewIds();
+        this._backgroundPreloadPromise = this.preloadViewsInBackground(viewIds);
+    }
+
+    private async preloadViewsInBackground(viewIds: GuicosId[]): Promise<void> {
+        if (viewIds.length === 0) {
+            return;
+        }
+
+        let nextIndex = 0;
+        const preloadNext = async () => {
+            while (nextIndex < viewIds.length) {
+                const viewId = viewIds[nextIndex++];
+                try {
+                    await this._viewsRegistry.preloadView(viewId);
+                } catch (error: unknown) {
+                    this._logger.warn(`[GuicosGui] Failed to background preload view: ${viewId}`, error);
+                }
+            }
+        };
+
+        const workerCount = Math.min(BACKGROUND_PRELOAD_CONCURRENCY, viewIds.length);
+        const workers = Array.from({ length: workerCount }, () => preloadNext());
+        await Promise.all(workers);
     }
 
     private attachOpenedView(record: GuicosViewRecord): void {

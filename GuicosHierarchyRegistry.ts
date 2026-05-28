@@ -8,6 +8,68 @@ type ViewCtor<TView extends IGuicosView> = new (...args: any[]) => TView;
 type SlotKey = string;
 type ScopedViewKey = string;
 
+export type GuicosViewDisposePolicy = "disposeWithScreen" | "disposeOnClose";
+
+export interface GuicosHierarchyOptions {
+    /**
+     * Enables background prefab preloading for views declared in this hierarchy.
+     *
+     * Defaults to true. When disabled, no views are added to the background
+     * preload queue unless they are explicitly opened or listed in a screen's
+     * blocking preload views.
+     */
+    backgroundPreload?: boolean;
+}
+
+export interface GuicosScreenHierarchyOptions {
+    /**
+     * Direct child view ids that must have their prefabs loaded before this
+     * screen is mounted.
+     *
+     * Use this for views that are required for the first stable frame of the
+     * screen, such as initial HUD layers. The views are not instantiated or
+     * shown by this option; normal screen logic still opens them.
+     */
+    preloadViews?: GuicosId[];
+
+    /**
+     * Controls whether direct child views of this screen participate in the
+     * hierarchy-wide background preload queue.
+     *
+     * Defaults to true. Set to false for optional or one-off screens whose
+     * views should stay lazy unless explicitly opened or listed in preloadViews.
+     */
+    backgroundPreload?: boolean;
+
+    /**
+     * Direct child view ids to exclude from the background preload queue while
+     * keeping background preload enabled for the rest of this screen.
+     *
+     * This does not prevent explicit blocking preload or on-demand loading.
+     */
+    excludeBackgroundPreloadViews?: GuicosId[];
+}
+
+export interface GuicosViewHierarchyOptions {
+    /**
+     * Controls whether this view participates in the background preload queue.
+     *
+     * Defaults to true. Set to false for rare, optional, or memory-sensitive
+     * views that should only load on demand or through a screen's preloadViews.
+     */
+    backgroundPreload?: boolean;
+
+    /**
+     * Controls how Guicos treats the instantiated view node after the view is
+     * closed.
+     *
+     * "disposeWithScreen" keeps the hidden instance cached until its host
+     * screen is disposed. "disposeOnClose" destroys the instance on every close,
+     * while the prefab asset remains managed by the views registry cache.
+     */
+    disposePolicy?: GuicosViewDisposePolicy;
+}
+
 type ReceivedContext<T> =
     T extends IReceiveContext<infer C> ? C : never;
 
@@ -26,6 +88,7 @@ export interface ScreenHierarchyNode extends HierarchyNode {
     type: "screen";
     ctor: ScreenCtor<any>;
     slots: SlotHierarchyNode[];
+    options: GuicosScreenHierarchyOptions;
 }
 
 export interface SlotHierarchyNode {
@@ -37,6 +100,7 @@ export interface SlotHierarchyNode {
 export interface ViewHierarchyNode extends HierarchyNode {
     type: "view";
     ctor: ViewCtor<any>;
+    options: GuicosViewHierarchyOptions;
 }
 
 export interface TypedScreenHierarchyNode<
@@ -107,9 +171,10 @@ export function screen<
 >(
     id: GuicosId,
     ctor: ScreenCtor<TScreen>,
-    slots: TypedSlotHierarchyNode<ProvidedContext<TScreen>>[] = []
+    slots: TypedSlotHierarchyNode<ProvidedContext<TScreen>>[] = [],
+    options: GuicosScreenHierarchyOptions = {},
 ): TypedScreenHierarchyNode<TScreen> {
-    return { type: "screen", id, ctor, slots };
+    return { type: "screen", id, ctor, slots, options };
 }
 
 export function slot<
@@ -130,13 +195,15 @@ export function view<
     TView extends IGuicosView & IReceiveContext<any>
 >(
     id: string,
-    ctor: ViewCtor<TView>
+    ctor: ViewCtor<TView>,
+    options: GuicosViewHierarchyOptions = {},
 ): TypedViewHierarchyNode<TView> {
-    return { type: "view", id, ctor };
+    return { type: "view", id, ctor, options };
 }
 
 export class GuicosHierarchy {
     private _hierarchy: ScreenHierarchyNode;
+    private readonly _options: GuicosHierarchyOptions;
     private _screenLookup!: Map<GuicosId, ScreenHierarchyNode>;
     private _screenChildren!: Map<GuicosId, Map<GuicosId, ScreenHierarchyNode | ViewHierarchyNode>>;
     private _screenParents!: Map<GuicosId, GuicosId>;
@@ -145,6 +212,9 @@ export class GuicosHierarchy {
     private _viewSlots!: Map<ScopedViewKey, SlotKey>;
     private _viewIdsByHostSlot!: Map<GuicosId, Map<SlotKey, GuicosId[]>>;
     private _viewOrder!: Map<ScopedViewKey, number>;
+    private _viewDisposePolicies!: Map<ScopedViewKey, GuicosViewDisposePolicy>;
+    private _blockingPreloadViewIdsByScreen!: Map<GuicosId, GuicosId[]>;
+    private _backgroundPreloadViewIds!: GuicosId[];
 
     /**
      * Id корневого экрана
@@ -153,8 +223,9 @@ export class GuicosHierarchy {
         return this._hierarchy.id;
     }
 
-    constructor(hierarchy: ScreenHierarchyNode) {
+    constructor(hierarchy: ScreenHierarchyNode, options: GuicosHierarchyOptions = {}) {
         this._hierarchy = hierarchy;
+        this._options = options;
         this.createLookup();
     }
 
@@ -167,6 +238,9 @@ export class GuicosHierarchy {
         this._viewSlots = new Map<ScopedViewKey, SlotKey>();
         this._viewIdsByHostSlot = new Map<GuicosId, Map<SlotKey, GuicosId[]>>();
         this._viewOrder = new Map<ScopedViewKey, number>();
+        this._viewDisposePolicies = new Map<ScopedViewKey, GuicosViewDisposePolicy>();
+        this._blockingPreloadViewIdsByScreen = new Map<GuicosId, GuicosId[]>();
+        const backgroundPreloadViewIds = new Set<GuicosId>();
         let nextViewOrder = 0;
 
         const registerNode = (
@@ -221,6 +295,7 @@ export class GuicosHierarchy {
 
                     this._viewSlots.set(scopedViewKey, slotKey);
                     this._viewOrder.set(scopedViewKey, nextViewOrder++);
+                    this._viewDisposePolicies.set(scopedViewKey, node.options.disposePolicy ?? "disposeWithScreen");
 
                     let viewIdsBySlot = this._viewIdsByHostSlot.get(hostScreenId);
                     if (viewIdsBySlot === undefined) {
@@ -244,6 +319,7 @@ export class GuicosHierarchy {
 
             const screenChildren = new Map<GuicosId, ScreenHierarchyNode | ViewHierarchyNode>();
             const screenSlotNames = new Set<string>();
+            const directViewIds = new Set<GuicosId>();
             this._screenChildren.set(node.id, screenChildren);
 
             for (let slotIndex = 0; slotIndex < node.slots.length; slotIndex++) {
@@ -264,15 +340,38 @@ export class GuicosHierarchy {
                     screenChildren.set(child.id, child);
 
                     if (child.type === "view") {
+                        directViewIds.add(child.id);
                         registerNode(child, undefined, node.id, slotKey);
                     } else {
                         registerNode(child, node.id, undefined, slotKey);
                     }
                 }
             }
+
+            this.validateViewIds(node.options.preloadViews ?? [], directViewIds, `preloadViews for screen: ${node.id}`);
+            this.validateViewIds(
+                node.options.excludeBackgroundPreloadViews ?? [],
+                directViewIds,
+                `excludeBackgroundPreloadViews for screen: ${node.id}`,
+            );
+
+            this._blockingPreloadViewIdsByScreen.set(node.id, this.uniqueViewIds(node.options.preloadViews ?? []));
+
+            if (this._options.backgroundPreload !== false && node.options.backgroundPreload !== false) {
+                const excludedViewIds = new Set(node.options.excludeBackgroundPreloadViews ?? []);
+                for (const directViewId of directViewIds) {
+                    const directView = screenChildren.get(directViewId) as ViewHierarchyNode;
+                    if (excludedViewIds.has(directViewId) || directView.options.backgroundPreload === false) {
+                        continue;
+                    }
+
+                    backgroundPreloadViewIds.add(directViewId);
+                }
+            }
         };
 
         registerNode(this._hierarchy);
+        this._backgroundPreloadViewIds = Array.from(backgroundPreloadViewIds);
     }
 
     public getScreen(screenId: GuicosId): ScreenHierarchyNode {
@@ -378,6 +477,26 @@ export class GuicosHierarchy {
         return viewIds;
     }
 
+    public getBlockingPreloadViewIds(screenId: GuicosId): GuicosId[] {
+        this.getScreen(screenId);
+        return [...(this._blockingPreloadViewIdsByScreen.get(screenId) ?? [])];
+    }
+
+    public getBackgroundPreloadViewIds(): GuicosId[] {
+        return [...this._backgroundPreloadViewIds];
+    }
+
+    public getViewDisposePolicy(hostScreenId: GuicosId, viewId: GuicosId): GuicosViewDisposePolicy {
+        this.getDirectChildView(hostScreenId, viewId);
+
+        const policy = this._viewDisposePolicies.get(this.createScopedViewKey(hostScreenId, viewId));
+        if (policy === undefined) {
+            throw new Error(`No dispose policy for view id: ${viewId} in screen: ${hostScreenId}`);
+        }
+
+        return policy;
+    }
+
     public isScreenDescendantOf(screenId: GuicosId, ancestorScreenId: GuicosId): boolean {
         this.getScreen(screenId);
         this.getScreen(ancestorScreenId);
@@ -405,5 +524,17 @@ export class GuicosHierarchy {
 
     private createScopedViewKey(hostScreenId: GuicosId, viewId: GuicosId): ScopedViewKey {
         return `${hostScreenId}::${viewId}`;
+    }
+
+    private validateViewIds(viewIds: GuicosId[], directViewIds: Set<GuicosId>, source: string): void {
+        for (const viewId of viewIds) {
+            if (!directViewIds.has(viewId)) {
+                throw new Error(`Invalid ${source}. View is not a direct child: ${viewId}`);
+            }
+        }
+    }
+
+    private uniqueViewIds(viewIds: GuicosId[]): GuicosId[] {
+        return Array.from(new Set(viewIds));
     }
 }
