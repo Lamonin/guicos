@@ -3,11 +3,13 @@ import { IProvideContext, IReceiveContext } from "./GuicosContext";
 import { GuicosEvent } from "./GuicosEvent";
 import { GuicosGuiFacade, IGuicosGuiFacade } from "./GuicosGuiFacade";
 import { GuicosHierarchy, ScreenHierarchyNode } from "./GuicosHierarchyRegistry";
+import type { ViewHierarchyNode } from "./GuicosHierarchyRegistry";
 import { GuicosId } from "./GuicosId";
 import { GuicosLifecycleScope, GuicosViewLifecycleState } from "./GuicosLifecycle";
 import { GUICOS_NOOP_LOGGER, IGuicosLogger } from "./GuicosLogger";
 import { IGuicosScreen } from "./GuicosScreen";
 import { GuicosView } from "./GuicosView";
+import type { GuicosPreloadableViewCtor } from "./GuicosView";
 import { GuicosViewsRegistry } from "./GuicosViewsRegistry";
 import { GuicosWidgetsRegistry } from "./GuicosWidgetsRegistry";
 
@@ -80,7 +82,7 @@ export class GuicosGui {
             rootScreen.__setLifecycleState("mounted");
         });
 
-        this.startBackgroundPreload();
+        this.startBackgroundPreload(context);
     }
 
     public async openScreen(screenId: GuicosId, contextOverride?: any): Promise<void> {
@@ -565,35 +567,50 @@ export class GuicosGui {
         await Promise.all(viewIds.map(viewId => this._viewsRegistry.preloadView(viewId)));
     }
 
-    private startBackgroundPreload(): void {
+    private startBackgroundPreload<TContext>(context: TContext): void {
         if (this._backgroundPreloadPromise !== null) {
             return;
         }
 
-        const viewIds = this._hierarchy.getBackgroundPreloadViewIds();
-        this._backgroundPreloadPromise = this.preloadViewsInBackground(viewIds);
+        const views = this._hierarchy.getBackgroundPreloadViews();
+        this._backgroundPreloadPromise = this.preloadViewsInBackground(views, context);
     }
 
-    private async preloadViewsInBackground(viewIds: GuicosId[]): Promise<void> {
-        if (viewIds.length === 0) {
+    private async preloadViewsInBackground<TContext>(views: ViewHierarchyNode[], context: TContext): Promise<void> {
+        if (views.length === 0) {
             return;
         }
 
         let nextIndex = 0;
         const preloadNext = async () => {
-            while (nextIndex < viewIds.length) {
-                const viewId = viewIds[nextIndex++];
+            while (nextIndex < views.length) {
+                const view = views[nextIndex++];
                 try {
-                    await this._viewsRegistry.preloadView(viewId);
+                    await this.preloadViewInBackground(view, context);
                 } catch (error: unknown) {
-                    this._logger.warn(`[GuicosGui] Failed to background preload view: ${viewId}`, error);
+                    this._logger.warn(`[GuicosGui] Failed to background preload view: ${view.id}`, error);
                 }
             }
         };
 
-        const workerCount = Math.min(BACKGROUND_PRELOAD_CONCURRENCY, viewIds.length);
+        const workerCount = Math.min(BACKGROUND_PRELOAD_CONCURRENCY, views.length);
         const workers = Array.from({ length: workerCount }, () => preloadNext());
         await Promise.all(workers);
+    }
+
+    private async preloadViewInBackground<TContext>(view: ViewHierarchyNode, context: TContext): Promise<void> {
+        await this._viewsRegistry.preloadView(view.id);
+
+        const viewCtor = view.ctor as GuicosPreloadableViewCtor;
+        if (viewCtor.preloadResources === undefined) {
+            return;
+        }
+
+        await viewCtor.preloadResources({
+            context,
+            widgets: this._widgetsRegistry,
+            logger: this._logger,
+        });
     }
 
     private attachOpenedView(record: GuicosViewRecord): void {

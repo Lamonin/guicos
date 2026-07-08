@@ -1,10 +1,11 @@
 import { GuicosId } from "./GuicosId";
 import { IGuicosScreen } from "./GuicosScreen";
+import type { GuicosPreloadableViewCtor } from "./GuicosView";
 import { IGuicosView } from "./GuicosView";
 import { IProvideContext, IReceiveContext } from "./GuicosContext";
 
 type ScreenCtor<TScreen extends IGuicosScreen> = new (...args: any[]) => TScreen;
-type ViewCtor<TView extends IGuicosView> = new (...args: any[]) => TView;
+type ViewCtor<TView extends IGuicosView> = GuicosPreloadableViewCtor<TView>;
 type SlotKey = string;
 type ScopedViewKey = string;
 
@@ -215,6 +216,7 @@ export class GuicosHierarchy {
     private _viewDisposePolicies!: Map<ScopedViewKey, GuicosViewDisposePolicy>;
     private _blockingPreloadViewIdsByScreen!: Map<GuicosId, GuicosId[]>;
     private _backgroundPreloadViewIds!: GuicosId[];
+    private _backgroundPreloadViews!: ViewHierarchyNode[];
 
     /**
      * Id корневого экрана
@@ -241,6 +243,7 @@ export class GuicosHierarchy {
         this._viewDisposePolicies = new Map<ScopedViewKey, GuicosViewDisposePolicy>();
         this._blockingPreloadViewIdsByScreen = new Map<GuicosId, GuicosId[]>();
         const backgroundPreloadViewIds = new Set<GuicosId>();
+        const backgroundPreloadViews = new Map<GuicosId, ViewHierarchyNode>();
         let nextViewOrder = 0;
 
         const registerNode = (
@@ -366,12 +369,16 @@ export class GuicosHierarchy {
                     }
 
                     backgroundPreloadViewIds.add(directViewId);
+                    if (!backgroundPreloadViews.has(directViewId)) {
+                        backgroundPreloadViews.set(directViewId, directView);
+                    }
                 }
             }
         };
 
         registerNode(this._hierarchy);
         this._backgroundPreloadViewIds = Array.from(backgroundPreloadViewIds);
+        this._backgroundPreloadViews = Array.from(backgroundPreloadViews.values());
     }
 
     public getScreen(screenId: GuicosId): ScreenHierarchyNode {
@@ -484,6 +491,10 @@ export class GuicosHierarchy {
 
     public getBackgroundPreloadViewIds(): GuicosId[] {
         return [...this._backgroundPreloadViewIds];
+    }
+
+    public getBackgroundPreloadViews(): ViewHierarchyNode[] {
+        return [...this._backgroundPreloadViews];
     }
 
     public getViewDisposePolicy(hostScreenId: GuicosId, viewId: GuicosId): GuicosViewDisposePolicy {

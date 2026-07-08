@@ -3,6 +3,8 @@ import { IReceiveContext, MaybePromise } from "./GuicosContext";
 import { IGuicosGuiFacade } from "./GuicosGuiFacade";
 import { GuicosId } from "./GuicosId";
 import { GuicosLifecycleScope, GuicosViewLifecycleState } from "./GuicosLifecycle";
+import type { IGuicosLogger } from "./GuicosLogger";
+import type { GuicosWidgetsRegistry } from "./GuicosWidgetsRegistry";
 const { ccclass } = _decorator;
 
 export interface IGuicosView {
@@ -12,6 +14,20 @@ export interface IGuicosView {
     show(): MaybePromise<void>;
     hide(): MaybePromise<void>;
 }
+
+export interface GuicosViewPreloadContext<TContext> {
+    readonly context: TContext;
+    readonly widgets: GuicosWidgetsRegistry;
+    readonly logger: IGuicosLogger;
+}
+
+export interface IGuicosViewResourcePreloader<TContext> {
+    preloadResources(context: GuicosViewPreloadContext<TContext>): MaybePromise<void>;
+}
+
+export type GuicosPreloadableViewCtor<TView extends IGuicosView = IGuicosView> =
+    (new (...args: any[]) => TView)
+    & Partial<IGuicosViewResourcePreloader<any>>;
 
 @ccclass("GuicosView")
 export abstract class GuicosView<TContext> extends Component implements IGuicosView, IReceiveContext<TContext> {
