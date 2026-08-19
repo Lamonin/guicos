@@ -92,6 +92,28 @@ export class GuicosGui {
         return this._backgroundPreloadPromise;
     }
 
+    /**
+     * Preloads one direct child view prefab without instantiating it or running
+     * the view's optional resource preloader.
+     */
+    public async preloadViewPrefabFrom(hostScreenId: GuicosId, viewId: GuicosId): Promise<void> {
+        this._hierarchy.getDirectChildView(hostScreenId, viewId);
+        await this._viewsRegistry.preloadView(viewId);
+    }
+
+    /**
+     * Preloads one direct child view and its declared resources without opening
+     * the host screen. This is useful for user-driven, predictable navigation.
+     */
+    public async preloadViewFrom<TContext>(
+        hostScreenId: GuicosId,
+        viewId: GuicosId,
+        context: TContext,
+    ): Promise<void> {
+        const view = this._hierarchy.getDirectChildView(hostScreenId, viewId);
+        await this.preloadViewInBackground(view, context);
+    }
+
     public async openScreen(screenId: GuicosId, contextOverride?: any): Promise<void> {
         if (this._historyStack.length === 0) {
             if (screenId !== this._hierarchy.rootId) {
