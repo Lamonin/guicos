@@ -81,8 +81,15 @@ export class GuicosGui {
             await rootScreen.mount();
             rootScreen.__setLifecycleState("mounted");
         });
+    }
 
-        this.startBackgroundPreload(context);
+    public startBackgroundPreload<TContext>(context: TContext): Promise<void> {
+        if (this._backgroundPreloadPromise === null) {
+            const views = this._hierarchy.getBackgroundPreloadViews();
+            this._backgroundPreloadPromise = this.preloadViewsInBackground(views, context);
+        }
+
+        return this._backgroundPreloadPromise;
     }
 
     public async openScreen(screenId: GuicosId, contextOverride?: any): Promise<void> {
@@ -565,15 +572,6 @@ export class GuicosGui {
         }
 
         await Promise.all(viewIds.map(viewId => this._viewsRegistry.preloadView(viewId)));
-    }
-
-    private startBackgroundPreload<TContext>(context: TContext): void {
-        if (this._backgroundPreloadPromise !== null) {
-            return;
-        }
-
-        const views = this._hierarchy.getBackgroundPreloadViews();
-        this._backgroundPreloadPromise = this.preloadViewsInBackground(views, context);
     }
 
     private async preloadViewsInBackground<TContext>(views: ViewHierarchyNode[], context: TContext): Promise<void> {
