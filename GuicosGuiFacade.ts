@@ -4,6 +4,11 @@ import { GuicosId } from "./GuicosId";
 import { IGuicosLogger } from "./GuicosLogger";
 import { GuicosWidgetsRegistry } from "./GuicosWidgetsRegistry";
 
+export interface GuicosEventPublishOptions {
+    /** Opt in only for publication awaited directly by a lifecycle hook. */
+    withinLifecycle?: boolean;
+}
+
 export interface IGuicosGuiFacade {
     readonly widgets: GuicosWidgetsRegistry;
     readonly logger: IGuicosLogger;
@@ -11,7 +16,7 @@ export interface IGuicosGuiFacade {
     closeScreen(screenId: GuicosId): Promise<void>;
     openView<TContext>(viewId: GuicosId, contextOverride?: TContext): Promise<void>;
     closeView(viewId: GuicosId): Promise<void>;
-    publishEvent<TEvent extends GuicosEvent>(event: TEvent): Promise<boolean>;
+    publishEvent<TEvent extends GuicosEvent>(event: TEvent, options?: GuicosEventPublishOptions): Promise<boolean>;
 }
 
 export class GuicosGuiFacade implements IGuicosGuiFacade {
@@ -21,6 +26,8 @@ export class GuicosGuiFacade implements IGuicosGuiFacade {
         private readonly eventTargetScreenId: GuicosId | null,
         private readonly widgetsRegistry: GuicosWidgetsRegistry,
         private readonly guicosLogger: IGuicosLogger,
+        private readonly transitionToken?: object,
+        private readonly eventSourceIsActive?: () => boolean,
     ) { }
 
     public get widgets(): GuicosWidgetsRegistry {
@@ -32,22 +39,23 @@ export class GuicosGuiFacade implements IGuicosGuiFacade {
     }
 
     public async openScreen<TContext>(screenId: GuicosId, contextOverride?: TContext): Promise<void> {
-        await this.runtime.openScreenFrom(this.ownerScreenId, screenId, contextOverride);
+        await this.runtime.openScreenFrom(this.ownerScreenId, screenId, contextOverride, this.transitionToken);
     }
 
     public async closeScreen(screenId: GuicosId): Promise<void> {
-        await this.runtime.closeScreenFrom(this.ownerScreenId, screenId);
+        await this.runtime.closeScreenFrom(this.ownerScreenId, screenId, this.transitionToken);
     }
 
     public async openView<TContext>(viewId: GuicosId, contextOverride?: TContext): Promise<void> {
-        await this.runtime.openViewFrom(this.ownerScreenId, viewId, contextOverride);
+        await this.runtime.openViewFrom(this.ownerScreenId, viewId, contextOverride, this.transitionToken);
     }
 
     public async closeView(viewId: GuicosId): Promise<void> {
-        await this.runtime.closeViewFrom(this.ownerScreenId, viewId);
+        await this.runtime.closeViewFrom(this.ownerScreenId, viewId, this.transitionToken);
     }
 
-    public async publishEvent<TEvent extends GuicosEvent>(event: TEvent): Promise<boolean> {
-        return this.runtime.publishEventToScreen(this.eventTargetScreenId, event);
+    public async publishEvent<TEvent extends GuicosEvent>(event: TEvent, options?: GuicosEventPublishOptions): Promise<boolean> {
+        return this.runtime.publishEventToScreen(this.eventTargetScreenId, event,
+            options?.withinLifecycle === true ? this.transitionToken : undefined, this.eventSourceIsActive);
     }
 }

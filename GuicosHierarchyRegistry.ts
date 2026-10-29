@@ -163,7 +163,7 @@ type CompatibleChildren<
     [K in keyof TChildren]: CompatibleChild<TContext, TChildren[K]>;
 };
 
-export interface TypedSlotHierarchyNode<TContext> extends SlotHierarchyNode {
+export interface TypedSlotHierarchyNode<_TContext> extends SlotHierarchyNode {
     children: SlotChild[];
 }
 

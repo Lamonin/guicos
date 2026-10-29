@@ -12,6 +12,9 @@ import { GuicosId } from "./GuicosId";
 import { GuicosScreenLifecycleState } from "./GuicosLifecycle";
 import { GUICOS_NOOP_LOGGER } from "./GuicosLogger";
 
+type RuntimeEventSubscription = Pick<GuicosEventSubscription<GuicosEvent>,
+    "eventCtor" | "isActive" | "unsubscribe" | "dispatch" | "deactivate">;
+
 export interface IGuicosScreen {
     set __gui(gui: IGuicosGuiFacade);
     get gui(): IGuicosGuiFacade;
@@ -25,7 +28,7 @@ export abstract class GuicosScreen<TContext, TExtendedContext extends TContext> 
     public __gui!: IGuicosGuiFacade;
     private _screenId!: GuicosId;
     private _lifecycleState: GuicosScreenLifecycleState = "created";
-    private readonly _eventSubscriptions = new Map<GuicosEventCtor<GuicosEvent>, GuicosEventSubscription<GuicosEvent>>();
+    private readonly _eventSubscriptions = new Map<GuicosEventCtor<GuicosEvent>, RuntimeEventSubscription>();
 
     public get gui(): IGuicosGuiFacade {
         return this.__gui;
@@ -93,7 +96,7 @@ export abstract class GuicosScreen<TContext, TExtendedContext extends TContext> 
         return this.subscribeEvent(eventCtor, callback, false);
     }
 
-    protected onUnhandledEvent(event: GuicosEvent): MaybePromise<void> { }
+    protected onUnhandledEvent(_event: GuicosEvent): MaybePromise<void> { }
     public mount(): MaybePromise<void> { }
     public unmount(): MaybePromise<void> { }
 
@@ -113,8 +116,8 @@ export abstract class GuicosScreen<TContext, TExtendedContext extends TContext> 
             eventCtor,
             callback.bind(this) as GuicosEventCallback<TEvent>,
             autoConsume,
-            this.unsubscribeEvent.bind(this),
-        ) as GuicosEventSubscription<GuicosEvent>;
+            subscription => this.unsubscribeEvent(subscription),
+        );
 
         this._eventSubscriptions.set(eventCtor as GuicosEventCtor<GuicosEvent>, subscription);
         return subscription;
@@ -129,7 +132,7 @@ export abstract class GuicosScreen<TContext, TExtendedContext extends TContext> 
         }
     }
 
-    private unsubscribeEvent(subscription: GuicosEventSubscription<GuicosEvent>): void {
+    private unsubscribeEvent(subscription: RuntimeEventSubscription): void {
         const current = this._eventSubscriptions.get(subscription.eventCtor);
         if (current !== subscription) {
             return;

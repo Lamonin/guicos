@@ -19,6 +19,8 @@ export interface GuicosViewPreloadContext<TContext> {
     readonly context: TContext;
     readonly widgets: GuicosWidgetsRegistry;
     readonly logger: IGuicosLogger;
+    /** Cooperative cancellation for asynchronous resource preloaders. */
+    readonly scope?: GuicosLifecycleScope;
 }
 
 export interface IGuicosViewResourcePreloader<TContext> {

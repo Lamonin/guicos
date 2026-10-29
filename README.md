@@ -73,7 +73,7 @@ export class ProfileSelectedEvent extends GuicosEvent {
 
 Screens subscribe with `onEvent` or `onEventPassThrough`:
 
-- `onEvent` consumes the event after the handler runs.
+- `onEvent` consumes the event before the handler runs.
 - `onEventPassThrough` runs the handler and lets the event bubble to parent
   screens.
 - Unhandled events bubble from the active screen toward the root screen.
@@ -314,18 +314,16 @@ Each view prefab must contain the matching `GuicosView` subclass component.
 ## Register Widget Prefabs
 
 Widgets are reusable prefabs that views can request through `this.gui.widgets`.
-Guicos does not instantiate widgets for you; it loads and caches their prefabs.
+Use `createWidget(id)` to load and instantiate a tracked widget. `getPrefab(id)` remains available for callers that manage their own instances and asset lifetime.
 
 ```ts
-import { instantiate } from "cc";
 import { GuicosView } from "game/guicos/Guicos";
 import { WidgetId } from "./UiIds";
 import type { AppContext } from "./AppContext";
 
 export class InventoryView extends GuicosView<AppContext> {
     public override async show(): Promise<void> {
-        const itemPrefab = await this.gui.widgets.getPrefab(WidgetId.InventoryItem);
-        const itemNode = instantiate(itemPrefab);
+        const itemNode = await this.gui.widgets.createWidget(WidgetId.InventoryItem);
         itemNode.setParent(this.node);
     }
 }
@@ -441,6 +439,10 @@ export async function startGui(
         logger,
     );
 
+    if (viewsRegistry === null || widgetsRegistry === null) {
+        throw new Error("Guicos registry prefab is missing its registry component.");
+    }
+
     const gui = new GuicosGui(
         rootNode,
         hierarchy,
@@ -521,3 +523,110 @@ are executed in order.
 - If a registry entry uses a resource path, a resource manager must be provided.
 - If a view is destroyed outside Guicos lifecycle, the views registry will throw
   when the cached instance is requested again.
+
+## Transition Ordering and Cleanup
+
+Public runtime navigation calls and event publication enter one queue. Each
+lifecycle hook and event handler receives an operation-scoped `this.gui` facade,
+so it can await child navigation without blocking its own queued transition:
+
+```ts
+public override async mount(): Promise<void> {
+    await this.gui.openView(ViewId.Home);
+}
+```
+
+Await navigation started by a hook. Independent model or service callbacks must
+use public `GuicosGui` methods or queued `publishEvent`, rather than navigation
+through a lifecycle-scoped facade while that hook is suspended. Guicos cannot
+infer the async origin of calls made through the same captured facade.
+
+UI events are queued even if a view is currently inside an asynchronous hook.
+Queued events retain their source lifetime: a hidden or disposed view cannot
+deliver input into a replacement, even if its screen id is reopened. Such late
+publications resolve to `false`, including when GUI disposal cancels queued view
+input; new public runtime navigation still rejects after disposal.
+When a hook or event handler deliberately needs to await nested publication,
+opt in explicitly so its handler can run in the current operation:
+
+```ts
+await this.gui.publishEvent(new ReadyEvent(), { withinLifecycle: true });
+```
+
+A replacement screen loads its blocking prefabs and finishes mounting before
+Guicos closes its previous sibling branch. If loading or mounting fails, the
+old branch stays open. Failed views and screens are disposed, their lifecycle
+scopes and subscriptions are cleared, and a later open can retry. Cleanup runs
+all remaining hooks and disposals after an error, then rejects with the first
+error.
+
+`gui.isScreenOpen(id)` reports whether a screen instance exists, including while
+mounting. `gui.isDisposed` becomes true as soon as disposal starts.
+
+Call `await gui.dispose()` when the runtime is no longer needed. Disposal is
+idempotent: it returns the same promise, immediately rejects new work, invalidates
+view and preload guards, and stops new registry loads. It waits for active
+navigation to settle, then closes every branch including the root and disposes
+both registries. Custom resource preloaders can check the optional
+`context.scope?.isActive` or use a guard to ignore late results. Third-party IO
+cannot be canceled by Guicos; late registry results relinquish their own asset
+reference and never instantiate a view.
+
+Pass a dedicated UI root configured with your project's `UITransform` and layout
+components. Guicos uses the supplied root directly and manages sibling ordering
+inside it. Disposal destroys managed views; the caller owns the root node.
+
+## Prefab Ownership and Cache Policy
+
+Both registries accept an optional fifth constructor argument:
+
+```ts
+const views = new GuicosViewsRegistry(prefabs, paths, resources, logger, {
+    prefabCachePolicy: "releaseUnused",
+    onPrefabReleased: (id, prefab) => logger.log(`Released ${id}: ${prefab.name}`),
+});
+```
+
+The default `"retain"` keeps loaded prefabs cached after views close, preserving
+the existing behavior. `"releaseUnused"` drops a prefab after its last tracked
+instance is destroyed. Set view `disposePolicy: "disposeOnClose"` as well if the
+application should retain only currently presented views. These policies control
+different lifetimes: hidden instances using `"disposeWithScreen"` still keep
+their prefabs alive.
+
+Each registry owns one `addRef()` per cached prefab id. Shared instances keep
+that reference alive until all deferred Cocos node destruction has completed;
+only then does the registry call `decRef()` and `onPrefabReleased`. A paused
+director can delay destruction and therefore delay release. The callback is a
+notification after relinquishing ownership, not permission to destroy resources
+still owned elsewhere. Resource managers remain responsible for any references
+they own independently. Concurrent requests for an id share a single load, and
+failed loads can be retried.
+
+Explicit preloads stay warm until consumed, trimmed with
+`registry.releaseUnusedPrefabs()`, or disposed. Trimming preserves every tracked
+live instance. Widgets created by `createWidget()` are tracked through their
+Cocos destruction event; `destroyWidget(node)` requests their destruction and
+registry disposal destroys remaining tracked widgets. Callers using `getPrefab()`
+and `instantiate()` directly must manage their instances and ensure they do not
+outlive the registry or explicitly trimmed prefab ownership.
+
+## Regression Tests
+
+The hidden `.tests` directory keeps test helpers outside the Cocos asset import
+surface. From a Zonk checkout:
+
+```sh
+node --test assets/scripts/guicos/.tests/run.cjs
+```
+
+The runner uses Node's test framework, lightweight Cocos doubles, and an existing
+TypeScript installation. In another consumer, install TypeScript or set
+`GUICOS_TYPESCRIPT` to its module path. The suite covers transition overlap,
+nested lifecycle navigation and event publication, failure retry, disposal
+during IO, asset reference ownership, and widget load coalescing. Consumer Cocos
+TypeScript checks and engine integration tests remain necessary.
+With Creator's loose script transform, use `Array.from(map.values())` or
+`Array.from(set)` when an array snapshot is needed. Spreading an iterator can
+compile as an array containing the iterator itself, although direct Node tests
+accept that source.

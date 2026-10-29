@@ -23,6 +23,7 @@ export class GuicosLifecycleScope {
     private readonly cleanups: GuicosLifecycleCleanup[] = [];
     private _isActive = true;
     private _revision = 0;
+    private _disposed = false;
 
     public constructor(public readonly name: string = "") { }
 
@@ -47,13 +48,17 @@ export class GuicosLifecycleScope {
         return new GuicosLifecycleGuard(this, this._revision);
     }
 
+    public invalidate(): void {
+        if (this._isActive) { this._isActive = false; this._revision++; }
+    }
+
     public async dispose(): Promise<void> {
-        if (!this._isActive) {
+        if (this._disposed) {
             return;
         }
 
-        this._isActive = false;
-        this._revision++;
+        this._disposed = true;
+        this.invalidate();
 
         const errors: unknown[] = [];
         for (let index = this.cleanups.length - 1; index >= 0; index--) {

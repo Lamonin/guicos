@@ -1,10 +1,11 @@
-import { instantiate, isValid, _decorator } from "cc";
+import { instantiate, isValid, Node, _decorator } from "cc";
 import { Prefab } from "cc";
 import { GuicosId } from "./GuicosId";
 import { GuicosView } from "./GuicosView";
 import { Component } from "cc";
 import { IGuicosResourceManager } from "./GuicosResourceManager";
 import { GUICOS_NOOP_LOGGER, IGuicosLogger } from "./GuicosLogger";
+import { afterGuicosNodeDestruction, GuicosPrefabCache, GuicosRegistryOptions } from "./GuicosPrefabCache";
 const { property } = _decorator;
 
 export type GuicosViewCtor<TView extends GuicosView<any> = GuicosView<any>> = new (...args: any[]) => TView;
@@ -13,7 +14,7 @@ export abstract class GuicosPrefabViewRegistryData {
     @property()
     public id: string = "";
     @property({ type: Prefab, displayOrder: 10 })
-    public prefab: Prefab = null;
+    public prefab: Prefab | null = null;
 }
 
 export abstract class GuicosResourceViewRegistryData {
@@ -26,33 +27,32 @@ export abstract class GuicosResourceViewRegistryData {
 export class GuicosViewsRegistry {
     private readonly _viewsCache: Map<GuicosId, GuicosView<any>> = new Map<GuicosId, GuicosView<any>>();
     private readonly _pendingViews: Map<GuicosId, Promise<GuicosView<any>>> = new Map<GuicosId, Promise<GuicosView<any>>>();
-    private readonly _prefabCache: Map<GuicosId, Prefab> = new Map<GuicosId, Prefab>();
-    private readonly _pendingPrefabs: Map<GuicosId, Promise<Prefab>> = new Map<GuicosId, Promise<Prefab>>();
-    private readonly prefabsRegistry: GuicosPrefabViewRegistryData[] = null;
-    private readonly resourcesRegistry: GuicosResourceViewRegistryData[] = null;
+    private readonly _instancePrefabIds = new Map<GuicosId, GuicosId>();
+    private readonly _prefabs: GuicosPrefabCache;
 
     constructor(
-        prefabsRegistry: GuicosPrefabViewRegistryData[],
-        resourcesRegistry: GuicosResourceViewRegistryData[],
-        private readonly resourceManager: IGuicosResourceManager = null,
+        private readonly prefabsRegistry: GuicosPrefabViewRegistryData[],
+        private readonly resourcesRegistry: GuicosResourceViewRegistryData[],
+        private readonly resourceManager: IGuicosResourceManager | null = null,
         private readonly logger: IGuicosLogger = GUICOS_NOOP_LOGGER,
+        options: GuicosRegistryOptions = {},
     ) {
-        this.prefabsRegistry = prefabsRegistry;
-        this.resourcesRegistry = resourcesRegistry;
+        this._prefabs = new GuicosPrefabCache(options, logger);
     }
 
     public async getOrCreateView(
         viewId: GuicosId,
-        viewCtor: GuicosViewCtor = null,
+        viewCtor: GuicosViewCtor | null = null,
         registryViewId: GuicosId = viewId,
     ): Promise<GuicosView<any>> {
+        this._prefabs.assertActive();
         const cachedView = this._viewsCache.get(viewId);
         if (cachedView !== undefined) {
             if (isValid(cachedView, true) && isValid(cachedView.node, true)) {
                 return cachedView;
             }
 
-            this._viewsCache.delete(viewId);
+            this.destroyView(viewId);
             throw new Error(`Cached view was destroyed outside Guicos lifecycle: ${viewId}`);
         }
 
@@ -74,44 +74,33 @@ export class GuicosViewsRegistry {
     public destroyView(viewId: GuicosId): void {
         const view = this._viewsCache.get(viewId);
         this._viewsCache.delete(viewId);
-
-        if (view === undefined || !isValid(view, true) || !isValid(view.node, true)) {
-            return;
+        const prefabId = this._instancePrefabIds.get(viewId);
+        this._instancePrefabIds.delete(viewId);
+        if (view !== undefined && isValid(view.node, true)) {
+            view.node.removeFromParent();
+            view.node.destroy();
         }
-
-        view.node.removeFromParent();
-        view.node.destroy();
+        if (prefabId !== undefined) {
+            afterGuicosNodeDestruction(() => this._prefabs.relinquish(prefabId), view?.node);
+        }
     }
+
+    /** Stop new IO immediately; existing instances remain available for unmount. */
+    public stopLoading(): void { this._prefabs.stopLoading(); }
+
+    public dispose(): void {
+        for (const id of this._viewsCache.keys()) this.destroyView(id);
+        this._prefabs.dispose();
+    }
+
+    public releaseUnusedPrefabs(): void { this._prefabs.releaseUnused(); }
 
     public async preloadView(registryViewId: GuicosId): Promise<void> {
         await this.getPrefab(registryViewId);
     }
 
-    public async getPrefab(id: GuicosId): Promise<Prefab> {
-        const cachedPrefab = this._prefabCache.get(id);
-        if (cachedPrefab !== undefined) {
-            if (isValid(cachedPrefab, true)) {
-                return cachedPrefab;
-            }
-
-            this._prefabCache.delete(id);
-        }
-
-        const pendingPrefab = this._pendingPrefabs.get(id);
-        if (pendingPrefab !== undefined) {
-            return await pendingPrefab;
-        }
-
-        const prefabPromise = this.loadPrefab(id);
-        this._pendingPrefabs.set(id, prefabPromise);
-
-        try {
-            const prefab = await prefabPromise;
-            this._prefabCache.set(id, prefab);
-            return prefab;
-        } finally {
-            this._pendingPrefabs.delete(id);
-        }
+    public getPrefab(id: GuicosId): Promise<Prefab> {
+        return this._prefabs.get(id, () => this.loadPrefab(id));
     }
 
     private async loadPrefab(id: GuicosId): Promise<Prefab> {
@@ -139,30 +128,29 @@ export class GuicosViewsRegistry {
         return prefabData.prefab;
     }
 
-    private createView(viewId: GuicosId, prefab: Prefab, viewCtor: GuicosViewCtor): GuicosView<any> {
-        const viewNode = instantiate(prefab);
-        const view = viewCtor !== null
-            ? viewNode.getComponent(viewCtor)
-            : viewNode.getComponent(GuicosView);
-
-        if (view === null) {
-            viewNode.destroy();
-            const componentName = viewCtor?.name ?? "GuicosView";
-            throw new Error(`View prefab must contain ${componentName} component: ${viewId}`);
-        }
-
-        return view;
-    }
-
     private async createAndCacheView(
         viewId: GuicosId,
-        viewCtor: GuicosViewCtor,
+        viewCtor: GuicosViewCtor | null,
         registryViewId: GuicosId,
     ): Promise<GuicosView<any>> {
         const prefab = await this.getPrefab(registryViewId);
-        const view = this.createView(registryViewId, prefab, viewCtor);
-        this._viewsCache.set(viewId, view);
-        return view;
+        this._prefabs.assertActive();
+        this._prefabs.acquire(registryViewId);
+        let viewNode: Node | undefined;
+        try {
+            viewNode = instantiate(prefab);
+            // Mount must prepare descendants before Cocos activates them on attach.
+            viewNode.active = false;
+            const view = viewCtor !== null ? viewNode.getComponent(viewCtor) : viewNode.getComponent(GuicosView);
+            if (view === null) throw new Error(`View prefab must contain ${viewCtor?.name ?? "GuicosView"} component: ${registryViewId}`);
+            this._instancePrefabIds.set(viewId, registryViewId);
+            this._viewsCache.set(viewId, view);
+            return view;
+        } catch (error) {
+            viewNode?.destroy();
+            afterGuicosNodeDestruction(() => this._prefabs.relinquish(registryViewId), viewNode);
+            throw error;
+        }
     }
 
     public static loadFromPrefab<
@@ -170,17 +158,17 @@ export class GuicosViewsRegistry {
     >(
         registryPrefab: Prefab,
         registryComponentType: new (...args: any[]) => TRegistryComponent,
-        resourceManager: IGuicosResourceManager = null,
+        resourceManager: IGuicosResourceManager | null = null,
         logger: IGuicosLogger = GUICOS_NOOP_LOGGER,
-    ): GuicosViewsRegistry {
-        let registry = null;
+    ): GuicosViewsRegistry | null {
+        let registry: GuicosViewsRegistry | null = null;
 
         const target = instantiate(registryPrefab);
         const registryComponent = target.getComponent(registryComponentType);
         if (registryComponent === null) {
             logger.error("Failed to load views registry from prefab. " + registryPrefab.name);
         } else {
-            registry = registryComponent.createRegistry(resourceManager, logger);
+            registry = registryComponent.createRegistry(resourceManager ?? undefined, logger);
         }
 
         target.destroy();
