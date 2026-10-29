@@ -1,4 +1,4 @@
-import { isValid, Node } from "cc";
+import { director, Director, isValid, Node } from "cc";
 import { IProvideContext, IReceiveContext } from "./GuicosContext";
 import { GuicosEvent } from "./GuicosEvent";
 import { GuicosGuiFacade, IGuicosGuiFacade } from "./GuicosGuiFacade";
@@ -11,6 +11,7 @@ import { IGuicosScreen } from "./GuicosScreen";
 import { GuicosView } from "./GuicosView";
 import type { GuicosPreloadableViewCtor } from "./GuicosView";
 import { GuicosViewsRegistry } from "./GuicosViewsRegistry";
+import { GuicosLoadOperation, GuicosNavigationOptions } from "./GuicosCancellation";
 import { GuicosWidgetsRegistry } from "./GuicosWidgetsRegistry";
 
 type RuntimeScreen = IGuicosScreen & IReceiveContext<any> & IProvideContext<any> & {
@@ -33,6 +34,16 @@ type RuntimeView = GuicosView<any> & IReceiveContext<any> & {
 type ScopedViewKey = string;
 const BACKGROUND_PRELOAD_CONCURRENCY = 2;
 
+export interface GuicosBackgroundPreloadOptions {
+    /** downloadOnly uses resourceManager.preload and never falls back to load. */
+    mode?: "warm" | "downloadOnly";
+    priorityViewIds?: GuicosId[];
+    delayBetweenMs?: number;
+    itemTimeoutMs?: number;
+    canRun?: () => boolean;
+    signal?: AbortSignal;
+}
+
 interface GuicosViewRecord {
     readonly key: ScopedViewKey;
     readonly viewId: GuicosId;
@@ -54,12 +65,15 @@ export class GuicosGui {
     private readonly _screenInstances: Map<GuicosId, RuntimeScreen> = new Map<GuicosId, RuntimeScreen>();
     private readonly _viewRecords: Map<ScopedViewKey, GuicosViewRecord> = new Map<ScopedViewKey, GuicosViewRecord>();
     private readonly _openedViewKeysByOrder: ScopedViewKey[] = [];
-    private readonly _lifecycleTokens = new Set<object>();
+    private readonly _lifecycleTokens = new Map<object, GuicosLoadOperation | undefined>();
+    private _activeLoadOperation: GuicosLoadOperation | undefined;
+    private _foregroundTransitions = 0;
     private _disposed = false;
     private readonly _preloadScope = new GuicosLifecycleScope("gui:preload");
     private _disposePromise: Promise<void> | null = null;
     private _transitionQueue: Promise<void> = Promise.resolve();
     private _backgroundPreloadPromise: Promise<void> | null = null;
+    private _backgroundOperation: GuicosLoadOperation | undefined;
 
     constructor(
         rootNode: Node,
@@ -74,32 +88,33 @@ export class GuicosGui {
         this._widgetsRegistry = widgetsRegistry;
     }
 
-    public async start<TContext>(context: TContext, transitionToken?: object): Promise<void> {
+    public async start<TContext>(context: TContext, options?: GuicosNavigationOptions, transitionToken?: object): Promise<void> {
         await this.runTransition(async () => {
             if (this._historyStack.length > 0) throw new Error("Guicos is already started");
             await this.preloadBlockingViews(this._hierarchy.rootId);
-            this.assertActive();
+            this.assertNavigationActive();
             const rootScreen = this.createScreenInstance(this._hierarchy.getScreen(this._hierarchy.rootId));
             try {
                 await this.withScreenFacade(rootScreen, () => rootScreen.setContext(context));
-                this.assertActive();
+                this.assertNavigationActive();
                 this._historyStack.push(rootScreen);
                 rootScreen.__setLifecycleState("mounting");
                 await this.withScreenFacade(rootScreen, () => rootScreen.mount());
-                this.assertActive();
+                this.assertNavigationActive();
                 rootScreen.__setLifecycleState("mounted");
             } catch (error) {
                 await this.cleanupFailedScreen(rootScreen.__screenId);
                 throw error;
             }
-        }, transitionToken);
+        }, transitionToken, options, true);
     }
 
-    public startBackgroundPreload<TContext>(context: TContext): Promise<void> {
+    public startBackgroundPreload<TContext>(context: TContext, options?: GuicosBackgroundPreloadOptions): Promise<void> {
         this.assertActive();
         if (this._backgroundPreloadPromise === null) {
-            const views = this._hierarchy.getBackgroundPreloadViews();
-            this._backgroundPreloadPromise = this.preloadViewsInBackground(views, context);
+            this._backgroundPreloadPromise = options === undefined
+                ? this.preloadViewsInBackground(this._hierarchy.getBackgroundPreloadViews(), context)
+                : this.preloadViewsProgressively(context, options);
         }
 
         return this._backgroundPreloadPromise;
@@ -129,20 +144,20 @@ export class GuicosGui {
         await this.preloadViewInBackground(view, context);
     }
 
-    public async openScreen(screenId: GuicosId, contextOverride?: any): Promise<void> {
+    public async openScreen(screenId: GuicosId, contextOverride?: any, options?: GuicosNavigationOptions): Promise<void> {
         await this.runTransition(async () => {
             const token = {};
-            this._lifecycleTokens.add(token);
+            this._lifecycleTokens.set(token, this._activeLoadOperation);
             try {
                 if (this._historyStack.length === 0) {
                     if (screenId !== this._hierarchy.rootId) throw new Error(`Cannot open screen: ${screenId} without an active parent screen`);
-                    await this.start(contextOverride, token);
-                } else await this.openScreenFrom(this.getActiveScreenId(), screenId, contextOverride, token);
+                    await this.start(contextOverride, undefined, token);
+                } else await this.openScreenFrom(this.getActiveScreenId(), screenId, contextOverride, undefined, token);
             } finally { this._lifecycleTokens.delete(token); }
-        });
+        }, undefined, options, true);
     }
 
-    public async openScreenFrom(parentScreenId: GuicosId, screenId: GuicosId, contextOverride?: any, transitionToken?: object): Promise<void> {
+    public async openScreenFrom(parentScreenId: GuicosId, screenId: GuicosId, contextOverride?: any, options?: GuicosNavigationOptions, transitionToken?: object): Promise<void> {
         await this.runTransition(async () => {
             const parentScreen = this.getScreenContextSource(parentScreenId);
             const childScreen = this._hierarchy.getDirectChildScreen(parentScreenId, screenId);
@@ -158,28 +173,29 @@ export class GuicosGui {
 
             await this.preloadBlockingViews(screenId);
 
-            this.assertActive();
+            this.assertNavigationActive();
             const screenInstance = this.createScreenInstance(childScreen);
             try {
                 await this.withScreenFacade(screenInstance, () => screenInstance.setContext(childContext));
-                this.assertActive();
+                this.assertNavigationActive();
                 this._historyStack.push(screenInstance);
                 screenInstance.__setLifecycleState("mounting");
                 await this.withScreenFacade(screenInstance, () => screenInstance.mount());
-                this.assertActive();
+                this.assertNavigationActive();
                 screenInstance.__setLifecycleState("mounted");
             } catch (error) {
                 await this.cleanupFailedScreen(screenId);
                 throw error;
             }
+            this.assertNavigationActive();
             await this.closeSameSlotSiblingScreens(screenId);
-        }, transitionToken);
+        }, transitionToken, options, true);
     }
 
     public async closeScreen(screenId: GuicosId): Promise<void> {
         await this.runTransition(async () => {
             const token = {};
-            this._lifecycleTokens.add(token);
+            this._lifecycleTokens.set(token, this._activeLoadOperation);
             try { await this.closeScreenFrom(this.getActiveScreenId(), screenId, token); }
             finally { this._lifecycleTokens.delete(token); }
         });
@@ -200,16 +216,16 @@ export class GuicosGui {
         }, transitionToken);
     }
 
-    public async openView(viewId: GuicosId, contextOverride?: any): Promise<void> {
+    public async openView(viewId: GuicosId, contextOverride?: any, options?: GuicosNavigationOptions): Promise<void> {
         await this.runTransition(async () => {
             const token = {};
-            this._lifecycleTokens.add(token);
-            try { await this.openViewFrom(this.getActiveScreenId(), viewId, contextOverride, token); }
+            this._lifecycleTokens.set(token, this._activeLoadOperation);
+            try { await this.openViewFrom(this.getActiveScreenId(), viewId, contextOverride, undefined, token); }
             finally { this._lifecycleTokens.delete(token); }
-        });
+        }, undefined, options, true);
     }
 
-    public async openViewFrom(parentScreenId: GuicosId, viewId: GuicosId, contextOverride?: any, transitionToken?: object): Promise<void> {
+    public async openViewFrom(parentScreenId: GuicosId, viewId: GuicosId, contextOverride?: any, options?: GuicosNavigationOptions, transitionToken?: object): Promise<void> {
         await this.runTransition(async () => {
             const parentScreen = this.getScreenContextSource(parentScreenId);
             const childView = this._hierarchy.getDirectChildView(parentScreenId, viewId);
@@ -258,13 +274,13 @@ export class GuicosGui {
                 catch (cleanupError) { this._logger.warn("[GuicosGui] Failed view cleanup", cleanupError); }
                 throw error;
             }
-        }, transitionToken);
+        }, transitionToken, options, true);
     }
 
     public async closeView(viewId: GuicosId): Promise<void> {
         await this.runTransition(async () => {
             const token = {};
-            this._lifecycleTokens.add(token);
+            this._lifecycleTokens.set(token, this._activeLoadOperation);
             try { await this.closeViewFrom(this.getActiveScreenId(), viewId, token); }
             finally { this._lifecycleTokens.delete(token); }
         });
@@ -333,7 +349,9 @@ export class GuicosGui {
         transitionToken?: object, sourceIsActive?: () => boolean): IGuicosGuiFacade {
         const owner = this._screenInstances.get(ownerScreenId);
         const guard = sourceIsActive ?? (() => this._screenInstances.get(ownerScreenId) === owner);
-        return new GuicosGuiFacade(this, ownerScreenId, eventTargetScreenId, this._widgetsRegistry,
+        const operation = transitionToken === undefined ? undefined : this._lifecycleTokens.get(transitionToken);
+        const widgets = operation === undefined ? this._widgetsRegistry : this._widgetsRegistry.forOperation(operation);
+        return new GuicosGuiFacade(this, ownerScreenId, eventTargetScreenId, widgets,
             this._logger, transitionToken, guard);
     }
 
@@ -453,11 +471,13 @@ export class GuicosGui {
             this.detachOpenedView(scopedViewKey);
         }
 
-        const view = await this._viewsRegistry.getOrCreateView(scopedViewKey, viewCtor, viewId) as RuntimeView;
+        const view = await this._viewsRegistry.getOrCreateView(scopedViewKey, viewCtor, viewId, this._activeLoadOperation) as RuntimeView;
         if (this._disposed) {
             this._viewsRegistry.destroyView(scopedViewKey);
             this.assertActive();
         }
+        try { this._activeLoadOperation?.throwIfCanceled(); }
+        catch (error) { this._viewsRegistry.destroyView(scopedViewKey); throw error; }
         const record: GuicosViewRecord = {
             key: scopedViewKey,
             viewId,
@@ -486,11 +506,12 @@ export class GuicosGui {
             return true;
         }
 
+        this._activeLoadOperation?.throwIfCanceled();
         return record.revision !== revision || record.state === "disposing" || record.state === "disposed";
     }
 
     private async ensureViewMounted(record: GuicosViewRecord, revision: number): Promise<void> {
-        this.assertActive();
+        this.assertNavigationActive();
         if (record.state !== "loading") {
             if (record.view.node.parent !== this._rootNode) {
                 this._rootNode.addChild(record.view.node);
@@ -517,7 +538,7 @@ export class GuicosGui {
     }
 
     private async showViewRecord(record: GuicosViewRecord, revision: number): Promise<void> {
-        this.assertActive();
+        this.assertNavigationActive();
         if (record.state === "visible") {
             this.attachOpenedView(record);
             return;
@@ -585,6 +606,8 @@ export class GuicosGui {
     private async disposeViewRecord(record: GuicosViewRecord): Promise<void> {
         if (record.state === "disposed" || record.state === "disposing") return;
         record.revision++;
+        record.mountScope?.invalidate();
+        record.visibleScope?.invalidate();
         const shouldHide = ["showing", "visible", "hiding"].includes(record.state);
         const shouldUnmount = record.mountScope !== null;
         record.state = "disposing";
@@ -631,23 +654,43 @@ export class GuicosGui {
         if (this._disposed) throw new Error("GuicosGui is disposed");
     }
 
-    private async runTransition<T>(operation: () => Promise<T>, token?: object): Promise<T> {
+    private assertNavigationActive(): void {
         this.assertActive();
-        if (token !== undefined && this._lifecycleTokens.has(token)) {
-            return await operation();
-        }
-        const next = this._transitionQueue.then(async () => {
-            this.assertActive();
-            return await operation();
-        });
+        this._activeLoadOperation?.throwIfCanceled();
+    }
+
+    private async runTransition<T>(operation: () => Promise<T>, token?: object,
+        options?: GuicosNavigationOptions, navigation = false): Promise<T> {
+        // Check runtime state here, rather than an unrelated active navigation's cancellation.
+        if (this._disposed) throw new Error("GuicosGui is disposed");
+        const nested = token !== undefined && this._lifecycleTokens.has(token);
+        const inherited = nested ? this._lifecycleTokens.get(token!) : undefined;
+        const execute = async () => {
+            if (this._disposed) throw new Error("GuicosGui is disposed");
+            const owned = navigation && (options !== undefined || inherited === undefined)
+                ? new GuicosLoadOperation(options, inherited) : undefined;
+            const previous = this._activeLoadOperation;
+            this._activeLoadOperation = owned ?? inherited;
+            try {
+                this._activeLoadOperation?.throwIfCanceled();
+                return await operation();
+            } finally {
+                this._activeLoadOperation = previous;
+                owned?.dispose();
+            }
+        };
+        if (nested) return execute();
+        this._foregroundTransitions++;
+        const next = this._transitionQueue.then(execute);
         this._transitionQueue = next.then(() => {}, () => {});
-        return await next;
+        try { return await next; }
+        finally { this._foregroundTransitions--; }
     }
 
     private async withScreenFacade<T>(screen: RuntimeScreen, operation: () => T | Promise<T>): Promise<T> {
         const token = {};
         const original = screen.gui;
-        this._lifecycleTokens.add(token);
+        this._lifecycleTokens.set(token, this._activeLoadOperation);
         screen.__bindRuntime(screen.__screenId, this.createFacade(screen.__screenId, this._hierarchy.getParentScreenId(screen.__screenId), token));
         try { return await operation(); }
         finally {
@@ -659,7 +702,7 @@ export class GuicosGui {
     private async withViewFacade<T>(record: GuicosViewRecord, operation: () => T | Promise<T>): Promise<T> {
         const token = {};
         const original = record.view.gui;
-        this._lifecycleTokens.add(token);
+        this._lifecycleTokens.set(token, this._activeLoadOperation);
         record.view.__bindRuntime(record.viewId, record.hostScreenId, this.createFacade(record.hostScreenId, record.hostScreenId,
             token, () => this.isEventSourceActive(record)));
         try { return await operation(); }
@@ -692,6 +735,8 @@ export class GuicosGui {
     public dispose(): Promise<void> {
         if (this._disposePromise !== null) return this._disposePromise;
         this._disposed = true;
+        this._activeLoadOperation?.cancel(new Error("GuicosGui is disposed"));
+        this._backgroundOperation?.cancel(new Error("GuicosGui is disposed"));
         this._preloadScope.invalidate();
         this._viewsRegistry.stopLoading();
         this._widgetsRegistry.stopLoading();
@@ -724,7 +769,58 @@ export class GuicosGui {
             return;
         }
 
-        await Promise.all(viewIds.map(viewId => this._viewsRegistry.preloadView(viewId)));
+        await Promise.all(viewIds.map(viewId => this._viewsRegistry.preloadView(viewId, this._activeLoadOperation)));
+    }
+
+    private async preloadViewsProgressively<TContext>(context: TContext, options: GuicosBackgroundPreloadOptions): Promise<void> {
+        const delayMs = options.delayBetweenMs ?? 120;
+        const timeoutMs = options.itemTimeoutMs ?? 15000;
+        if (!Number.isFinite(delayMs) || delayMs < 0) throw new RangeError("Guicos delayBetweenMs must be finite and nonnegative");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new RangeError("Guicos itemTimeoutMs must be positive and finite");
+        const operation = new GuicosLoadOperation({ signal: options.signal });
+        this._backgroundOperation = operation;
+        const views = this._hierarchy.getBackgroundPreloadViews();
+        const ids = options.mode === "downloadOnly"
+            ? this._viewsRegistry.getResourceViewIds() : views.map(view => view.id);
+        const priority = options.priorityViewIds ?? [];
+        const ordered = Array.from(new Set(priority.filter(id => ids.includes(id)).concat(ids)));
+        try {
+            let onDraw: (() => void) | undefined;
+            const frame = new Promise<void>(resolve => { onDraw = resolve; director.once(Director.EVENT_AFTER_DRAW, onDraw); });
+            try { await operation.wait(frame); }
+            finally { if (onDraw !== undefined) director.off(Director.EVENT_AFTER_DRAW, onDraw); }
+            for (const id of ordered) {
+                // Always yield, even with delayBetweenMs=0. Foreground work can enter the queue.
+                await this.backgroundDelay(delayMs, operation);
+                while (this._foregroundTransitions > 0 || options.canRun?.() === false) {
+                    await this.backgroundDelay(Math.max(16, delayMs), operation);
+                }
+                operation.throwIfCanceled();
+                if (this._disposed) return;
+                const item = new GuicosLoadOperation({ timeoutMs }, operation);
+                try {
+                    if (options.mode === "downloadOnly") await this._viewsRegistry.preloadViewDownload(id, item);
+                    else {
+                        const view = views.find(view => view.id === id);
+                        if (view !== undefined) await this.preloadViewInBackground(view, context, item);
+                    }
+                } catch (error) {
+                    if (operation.isCanceled) return;
+                    this._logger.warn(`[GuicosGui] Failed to background preload view: ${id}`, error);
+                } finally { item.dispose(); }
+            }
+        } catch (error) {
+            if (!operation.isCanceled) throw error;
+        } finally {
+            operation.dispose();
+            if (this._backgroundOperation === operation) this._backgroundOperation = undefined;
+        }
+    }
+
+    private async backgroundDelay(ms: number, operation: GuicosLoadOperation): Promise<void> {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try { await operation.wait(new Promise<void>(resolve => { timer = setTimeout(resolve, ms); })); }
+        finally { if (timer !== undefined) clearTimeout(timer); }
     }
 
     private async preloadViewsInBackground<TContext>(views: ViewHierarchyNode[], context: TContext): Promise<void> {
@@ -749,8 +845,9 @@ export class GuicosGui {
         await Promise.all(workers);
     }
 
-    private async preloadViewInBackground<TContext>(view: ViewHierarchyNode, context: TContext): Promise<void> {
-        await this._viewsRegistry.preloadView(view.id);
+    private async preloadViewInBackground<TContext>(view: ViewHierarchyNode, context: TContext, operation?: GuicosLoadOperation): Promise<void> {
+        await this._viewsRegistry.preloadView(view.id, operation);
+        operation?.throwIfCanceled();
 
         this.assertActive();
         const viewCtor = view.ctor as GuicosPreloadableViewCtor;
@@ -758,12 +855,22 @@ export class GuicosGui {
             return;
         }
 
-        await viewCtor.preloadResources({
-            context,
-            widgets: this._widgetsRegistry,
-            logger: this._logger,
-            scope: this._preloadScope,
-        });
+        const scope = operation === undefined ? this._preloadScope : new GuicosLifecycleScope(`preload:${view.id}`);
+        const detach = operation?.onCancel(() => scope.invalidate());
+        if (operation !== undefined) this._preloadScope.onDispose(() => scope.dispose());
+        try {
+            const preloading = Promise.resolve(viewCtor.preloadResources({
+                context,
+                widgets: operation === undefined ? this._widgetsRegistry : this._widgetsRegistry.forOperation(operation),
+                logger: this._logger,
+                scope,
+            }));
+            if (operation === undefined) await preloading;
+            else await operation.wait(preloading);
+        } finally {
+            detach?.();
+            if (operation?.isCanceled) await scope.dispose();
+        }
     }
 
     private attachOpenedView(record: GuicosViewRecord): void {

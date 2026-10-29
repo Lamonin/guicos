@@ -13,3 +13,5 @@ export * from "./GuicosView";
 export * from "./GuicosViewsRegistry";
 export * from "./GuicosWidgetsRegistry";
 export type { GuicosRegistryOptions } from "./GuicosPrefabCache";
+export { GuicosLoadOperation, GuicosNavigationCanceledError } from "./GuicosCancellation";
+export type { GuicosNavigationOptions } from "./GuicosCancellation";

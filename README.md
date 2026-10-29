@@ -568,9 +568,9 @@ idempotent: it returns the same promise, immediately rejects new work, invalidat
 view and preload guards, and stops new registry loads. It waits for active
 navigation to settle, then closes every branch including the root and disposes
 both registries. Custom resource preloaders can check the optional
-`context.scope?.isActive` or use a guard to ignore late results. Third-party IO
-cannot be canceled by Guicos; late registry results relinquish their own asset
-reference and never instantiate a view.
+`context.scope?.isActive` or use a guard to ignore late results. Third-party transport cannot be canceled by Guicos. Canceled registry observers
+stop waiting immediately; late results relinquish their own asset reference and
+never attach or show a view.
 
 Pass a dedicated UI root configured with your project's `UITransform` and layout
 components. Guicos uses the supplied root directly and manages sibling ordering
@@ -630,3 +630,80 @@ With Creator's loose script transform, use `Array.from(map.values())` or
 `Array.from(set)` when an array snapshot is needed. Spreading an iterator can
 compile as an array containing the iterator itself, although direct Node tests
 accept that source.
+
+## Cancelable Navigation Loads
+
+`start(context, options)`, `openScreen(id, context, options)`,
+`openView(id, context, options)`, and their `From(parent, id, context, options)`
+variants accept `GuicosNavigationOptions`. Lifecycle facade `openScreen` and
+`openView` accept the same optional third argument:
+
+```ts
+const controller = new AbortController();
+await gui.openScreenFrom("app", "profile", context, {
+    signal: controller.signal,
+    timeoutMs: 15000,
+});
+// A newer requested target can call controller.abort().
+```
+
+The options follow nested lifecycle navigation and widget loading automatically.
+Cancellation interrupts library load waits, unwinds failed screen/view cleanup,
+and allows queued navigation to continue even when the abandoned transport never
+settles. A retry of the same id can issue fresh IO once all observers of its old
+request have canceled. Another active observer keeps shared IO alive. Late
+abandoned results do not populate the cache or instantiate a replacement view;
+an abort between completion and delivery also releases unused owned assets.
+
+`GuicosNavigationCanceledError` has `name: "AbortError"` for cancellation or
+`name: "TimeoutError"` and `timedOut: true` for a deadline. Deadlines begin when
+navigation executes, excluding time spent waiting in the transition queue.
+Explicit child options inherit parent cancellation. Without options, navigation
+has no deadline, preserving existing behavior.
+
+Guicos does not race or terminate arbitrary lifecycle hooks, event handlers,
+application promises, or transport requests. A hook awaiting a third-party
+promise outside the registries must implement its own cooperative cancellation.
+If cancellation arrives during a hook, Guicos lets it finish before checking
+whether the navigation may commit. This keeps asset destruction and application
+side effects ordered safely. Callers implementing a loading overlay should
+abort the navigation's controller on timeout and unlock input in `finally`.
+
+## Progressive Download Preloading
+
+Calling `startBackgroundPreload(context)` without options preserves the existing
+warm-prefab preload behavior. Supplying options opts into a progressive serial
+scheduler:
+
+```ts
+await gui.startBackgroundPreload(undefined, {
+    mode: "downloadOnly",
+    priorityViewIds: ["shop", "profile", "settings"],
+    delayBetweenMs: 120,
+    itemTimeoutMs: 15000,
+    canRun: () => !app.busy && document.visibilityState !== "hidden",
+});
+```
+
+Start it after the application presents its initial screen. The scheduler waits
+for the next draw, yields between every item, and starts no new task while
+foreground transitions are queued or `canRun()` returns false. Download-only
+mode visits every resource-backed view registered in the views registry,
+regardless of hierarchy background-preload flags. Priority ids run first and the
+rest follow registration order. A finite per-item timeout logs a failure and
+continues. Optional `signal` cancels the schedule; GUI disposal stops its waits
+and pending tasks. Cancellation resolves the background schedule normally.
+
+Download-only mode requires the resource manager's optional
+`preload(path, type): Promise<void>` capability, which must download dependencies
+without retaining instantiated assets. It never calls `load`, instantiates
+nodes, or adds prefab references; if that capability is absent, it skips the
+item. On-demand foreground loading remains unchanged. Cocos adapters can wrap
+`resources.preload(path, Prefab, completedCallback)`.
+
+Progressive `mode: "warm"` loads the hierarchy's background-preload views and
+runs their declared resource preloaders. These still follow the registry cache
+policy. Their scopes invalidate when an item times out, and their widget waits
+are cancelable. Only one scheduled observer runs at a time; an underlying
+transport that ignores cancellation can continue after its timeout. Foreground
+work does not wait for background download tasks.

@@ -4,6 +4,8 @@ import { IGuicosResourceManager } from "./GuicosResourceManager";
 
 import { afterGuicosNodeDestruction, GuicosPrefabCache, GuicosRegistryOptions } from "./GuicosPrefabCache";
 
+import { GuicosLoadOperation } from "./GuicosCancellation";
+
 const { property, ccclass } = _decorator;
 
 export abstract class GuicosWidgetRegistryData {
@@ -40,12 +42,18 @@ export class GuicosWidgetsRegistry {
         this.cache = new GuicosPrefabCache(options, logger);
     }
 
-    public getPrefab(id: string): Promise<Prefab> {
-        return this.cache.get(id, () => this.loadPrefab(id));
+    public getPrefab(id: string, operation?: GuicosLoadOperation): Promise<Prefab> {
+        return this.cache.get(id, () => this.loadPrefab(id), operation);
     }
 
-    public async createWidget(id: string): Promise<Node> {
-        const prefab = await this.getPrefab(id);
+    /** @internal Keep lifecycle widget IO inside its navigation's cancellation. */
+    public forOperation(operation: GuicosLoadOperation): GuicosWidgetsRegistry {
+        return new GuicosOperationWidgetsRegistry(this, operation);
+    }
+
+    public async createWidget(id: string, operation?: GuicosLoadOperation): Promise<Node> {
+        const prefab = await this.getPrefab(id, operation);
+        operation?.throwIfCanceled();
         this.cache.assertActive();
         this.cache.acquire(id);
         let node: Node;
@@ -115,6 +123,29 @@ export class GuicosWidgetsRegistry {
         const registry = registryComponent.createRegistry(resourceManager ?? undefined, logger);
         target.destroy();
         return registry;
+    }
+}
+
+/** A facade shares the owner's cache and instances; it never owns another asset. */
+class GuicosOperationWidgetsRegistry extends GuicosWidgetsRegistry {
+    public constructor(private readonly owner: GuicosWidgetsRegistry, private readonly operation: GuicosLoadOperation) {
+        super([], []);
+    }
+
+    public override getPrefab(id: string, operation = this.operation): Promise<Prefab> {
+        return this.owner.getPrefab(id, operation);
+    }
+
+    public override createWidget(id: string, operation = this.operation): Promise<Node> {
+        return this.owner.createWidget(id, operation);
+    }
+
+    public override destroyWidget(node: Node): void { this.owner.destroyWidget(node); }
+    public override releaseUnusedPrefabs(): void { this.owner.releaseUnusedPrefabs(); }
+    public override stopLoading(): void { this.owner.stopLoading(); }
+    public override dispose(): void { this.owner.dispose(); }
+    public override forOperation(operation: GuicosLoadOperation): GuicosWidgetsRegistry {
+        return this.owner.forOperation(operation);
     }
 }
 

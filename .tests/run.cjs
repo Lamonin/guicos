@@ -35,7 +35,7 @@ const cc = {
     Node, Component, Prefab,
     instantiate: prefab => prefab.factory(),
     isValid: (value, strict) => !!value && value.valid !== false && (!strict || !value.pending),
-    director: { once: (_event, callback) => afterDraw.push(callback) },
+    director: { once: (_event, callback) => afterDraw.push(callback), off: (_event, callback) => { afterDraw = afterDraw.filter(item => item !== callback); } },
     Director: { EVENT_AFTER_DRAW: 'afterDraw' },
     _decorator: { property: () => () => {}, ccclass: () => ctor => ctor },
 };
@@ -44,11 +44,12 @@ Module._load = function (request, parent, main) { return request === 'cc' ? cc :
 require.extensions['.ts'] = (module, filename) => module._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
     compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS, experimentalDecorators: true }, fileName: filename,
 }).outputText, filename);
-const { GuicosGui, GuicosHierarchy, GuicosScreen, GuicosView, GuicosViewsRegistry, GuicosWidgetsRegistry, defineGuicosEvent, screen, slot, view } = require('../Guicos.ts');
+const { GuicosGui, GuicosHierarchy, GuicosScreen, GuicosView, GuicosViewsRegistry, GuicosWidgetsRegistry, GuicosLoadOperation, defineGuicosEvent, screen, slot, view } = require('../Guicos.ts');
 const flush = () => { const nodes = destroyed; destroyed = []; nodes.forEach(node => node.valid && node.flush()); const callbacks = afterDraw; afterDraw = []; callbacks.forEach(callback => callback()); };
 afterEach(flush);
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
 const tick = () => new Promise(resolve => setImmediate(resolve));
+const waitUntil = async predicate => { const end = Date.now() + 1000; while (!predicate()) { assert.ok(Date.now() < end, 'condition timed out'); await new Promise(resolve => setTimeout(resolve, 2)); } };
 const prefabFor = (ctor, created = []) => new Prefab(() => { const node = new Node(ctor.name); const component = new ctor(); component.node = node; node.component = component; created.push(component); return node; });
 function fixture(rootScreen, children = [], entries = [], options) {
     const host = new Node('host');
@@ -194,6 +195,143 @@ test('registry disposed during IO rejects coalesced readers and releases late as
     const a = registry.getPrefab('a'), b = registry.getPrefab('a'); registry.dispose(); gate.resolve(prefab);
     await Promise.all([assert.rejects(a, /disposed/), assert.rejects(b, /disposed/)]);
     assert.equal(loads, 1); assert.equal(released, 1); assert.equal(prefab.refCount, 0);
+});
+
+test('cancel after transport completion but before delivery releases its unused cache ownership', async () => {
+    const gate = deferred(), prefab = new Prefab(), operation = new GuicosLoadOperation();
+    const registry = new GuicosViewsRegistry([], [{ id: 'a', path: 'a' }], { load: () => gate.promise }, undefined, { prefabCachePolicy: 'releaseUnused' });
+    const reading = registry.getPrefab('a', operation);
+    gate.resolve(prefab); queueMicrotask(() => operation.cancel());
+    await assert.rejects(reading, /canceled/); await tick();
+    assert.equal(prefab.refCount, 0); registry.dispose();
+});
+
+test('cancel nested never-resolving navigation, retry same view, and ignore late abandoned completion', { timeout: 2000 }, async () => {
+    const first = deferred(), created = [], prefabs = [prefabFor(GuicosView, created), prefabFor(GuicosView, created)];
+    let loads = 0;
+    const registry = new GuicosViewsRegistry([], [{ id: 'view', path: 'view' }], { load: () => ++loads === 1 ? first.promise : Promise.resolve(prefabs[1]) }, undefined, { prefabCachePolicy: 'releaseUnused' });
+    class Child extends GuicosScreen { async mount() { await this.gui.openView('view'); } }
+    const hierarchy = new GuicosHierarchy(screen('root', GuicosScreen, [slot('route', [screen('child', Child, [slot('view', [view('view', GuicosView)])])])]));
+    const gui = new GuicosGui(new Node(), hierarchy, registry, new GuicosWidgetsRegistry([], []));
+    await gui.start({}); const controller = new AbortController();
+    const firstOpen = gui.openScreenFrom('root', 'child', undefined, { signal: controller.signal });
+    await tick(); assert.equal(loads, 1); controller.abort(); await assert.rejects(firstOpen, /canceled/);
+    assert.equal(gui.isScreenOpen('child'), false);
+    await gui.openScreenFrom('root', 'child'); assert.equal(loads, 2); assert.equal(created.length, 1);
+    first.resolve(prefabs[0]); await tick(); assert.equal(created.length, 1); assert.equal(prefabs[0].refCount, 0);
+    assert.equal(prefabs[1].refCount, 1); await gui.dispose(); flush(); assert.equal(prefabs[1].refCount, 0);
+});
+
+test('one canceled asset observer cannot cancel another consumer sharing its transport', async () => {
+    const gate = deferred(), prefab = new Prefab(), operation = new GuicosLoadOperation(); let loads = 0;
+    const registry = new GuicosViewsRegistry([], [{ id: 'a', path: 'a' }], { load: () => { loads++; return gate.promise; } });
+    const canceled = registry.getPrefab('a', operation), surviving = registry.getPrefab('a');
+    operation.cancel(); await assert.rejects(canceled, /canceled/); gate.resolve(prefab);
+    assert.equal(await surviving, prefab); assert.equal(loads, 1); assert.equal(prefab.refCount, 1);
+    registry.dispose(); flush(); assert.equal(prefab.refCount, 0);
+});
+
+test('late abandoned IO returning the same asset cannot release a newer request ownership', async () => {
+    const first = deferred(), prefab = new Prefab(), operation = new GuicosLoadOperation(); let loads = 0;
+    const registry = new GuicosViewsRegistry([], [{ id: 'a', path: 'a' }], { load: () => ++loads === 1 ? first.promise : Promise.resolve(prefab) });
+    const canceled = registry.getPrefab('a', operation); operation.cancel(); await assert.rejects(canceled, /canceled/);
+    assert.equal(await registry.getPrefab('a'), prefab); assert.equal(prefab.refCount, 1);
+    first.resolve(prefab); await tick(); assert.equal(prefab.refCount, 1);
+    registry.dispose(); flush(); assert.equal(prefab.refCount, 0);
+});
+
+test('aborting a queued navigation cannot terminate an active domain event handler', async () => {
+    const Event = defineGuicosEvent('domain-action'), gate = deferred(), entered = deferred(); let completed = false;
+    class Root extends GuicosScreen { mount() { this.onEvent(Event, async () => { entered.resolve(); await gate.promise; completed = true; }); } }
+    const f = fixture(Root, [slot('view', [view('view', GuicosView)])], [{ id: 'view', prefab: prefabFor(GuicosView) }]);
+    await f.gui.start({}); const event = f.gui.publishEventToScreen('root', new Event()); await entered.promise;
+    const controller = new AbortController(), navigation = f.gui.openViewFrom('root', 'view', undefined, { signal: controller.signal });
+    controller.abort(); await tick(); assert.equal(completed, false);
+    gate.resolve(); assert.equal(await event, true); assert.equal(completed, true);
+    await assert.rejects(navigation, /canceled/); await f.gui.dispose();
+});
+
+test('lifecycle widget load inherits cancellation and retry does not wait on abandoned transport', { timeout: 2000 }, async () => {
+    const first = deferred(), widgets = [new Prefab(), new Prefab()]; let loads = 0;
+    const registry = new GuicosWidgetsRegistry([], [{ id: 'item', path: 'item' }], { load: () => ++loads === 1 ? first.promise : Promise.resolve(widgets[1]) });
+    class Child extends GuicosScreen { async mount() { await this.gui.widgets.createWidget('item'); } }
+    const gui = new GuicosGui(new Node(), new GuicosHierarchy(screen('root', GuicosScreen, [slot('route', [screen('child', Child)])])), new GuicosViewsRegistry([], []), registry);
+    await gui.start({}); const controller = new AbortController();
+    const firstOpen = gui.openScreenFrom('root', 'child', undefined, { signal: controller.signal }); await tick();
+    controller.abort(); await assert.rejects(firstOpen, /canceled/);
+    await gui.openScreenFrom('root', 'child'); assert.equal(loads, 2);
+    first.resolve(widgets[0]); await tick(); assert.equal(widgets[0].refCount, 0); assert.equal(widgets[1].refCount, 1);
+    await gui.dispose(); flush(); assert.equal(widgets[1].refCount, 0);
+});
+
+test('timeout releases the navigation queue while its network request never settles', { timeout: 2000 }, async () => {
+    class Slow extends GuicosView {}
+    const registry = new GuicosViewsRegistry([], [{ id: 'slow', path: 'slow' }], { load: () => new Promise(() => {}) });
+    const gui = new GuicosGui(new Node(), new GuicosHierarchy(screen('root', GuicosScreen, [slot('view', [view('slow', Slow)])])), registry, new GuicosWidgetsRegistry([], []));
+    await gui.start({});
+    const slow = gui.openViewFrom('root', 'slow', undefined, { timeoutMs: 15 });
+    const queued = gui.closeViewFrom('root', 'slow');
+    await assert.rejects(slow, error => error.name === 'TimeoutError');
+    await queued;
+    await gui.dispose();
+});
+
+test('progressive download-only covers every registered resource, waits for frame, prioritizes ids and foreground', { timeout: 2000 }, async () => {
+    const downloads = [], firstDownload = deferred(), foreground = deferred(), foregroundStarted = deferred();
+    let canRun = false;
+    class Child extends GuicosScreen { async mount() { foregroundStarted.resolve(); await foreground.promise; } }
+    const registry = new GuicosViewsRegistry([], ['menu', 'rules', 'shop', 'profile'].map(id => ({ id, path: id })), {
+        load: () => assert.fail('download-only cannot load Prefabs'),
+        preload: async path => { downloads.push(path); if (path === 'shop') await firstDownload.promise; },
+    });
+    const hierarchy = new GuicosHierarchy(screen('root', GuicosScreen, [slot('route', [screen('child', Child)])]), { backgroundPreload: false });
+    const gui = new GuicosGui(new Node(), hierarchy, registry, new GuicosWidgetsRegistry([], []));
+    await gui.start({});
+    const preload = gui.startBackgroundPreload(undefined, { mode: 'downloadOnly', priorityViewIds: ['shop', 'profile', 'missing'], delayBetweenMs: 2, itemTimeoutMs: 1000, canRun: () => canRun });
+    await tick(); assert.deepEqual(downloads, []); flush();
+    await new Promise(resolve => setTimeout(resolve, 20)); assert.deepEqual(downloads, []);
+    canRun = true; await waitUntil(() => downloads.length === 1); assert.deepEqual(downloads, ['shop']);
+    const opening = gui.openScreenFrom('root', 'child'); await foregroundStarted.promise;
+    firstDownload.resolve(); await new Promise(resolve => setTimeout(resolve, 25)); assert.deepEqual(downloads, ['shop']);
+    foreground.resolve(); await opening; await preload;
+    assert.deepEqual(downloads, ['shop', 'profile', 'menu', 'rules']); await gui.dispose();
+});
+
+test('progressive preload times out a hung item and disposal prevents further download tasks', { timeout: 2000 }, async () => {
+    const downloads = [], late = deferred();
+    const registry = new GuicosViewsRegistry([], ['hung', 'next', 'last'].map(id => ({ id, path: id })), {
+        load: () => assert.fail('download-only cannot load'),
+        preload: path => { downloads.push(path); return path === 'hung' ? late.promise : Promise.resolve(); },
+    });
+    const gui = new GuicosGui(new Node(), new GuicosHierarchy(screen('root', GuicosScreen)), registry, new GuicosWidgetsRegistry([], []));
+    await gui.start({});
+    const background = gui.startBackgroundPreload(undefined, { mode: 'downloadOnly', delayBetweenMs: 15, itemTimeoutMs: 10 }); flush();
+    await waitUntil(() => downloads.length === 2); await gui.dispose(); await background;
+    assert.deepEqual(downloads, ['hung', 'next']); late.resolve(); await tick(); assert.deepEqual(downloads, ['hung', 'next']);
+});
+
+test('download-only without a preload capability never falls back to asset loading', async () => {
+    let loads = 0;
+    const registry = new GuicosViewsRegistry([], [{ id: 'a', path: 'a' }], { load: async () => { loads++; return new Prefab(); } });
+    await registry.preloadViewDownload('a'); assert.equal(loads, 0); registry.dispose();
+});
+
+test('background disposal before the first draw releases its wait without starting IO', async () => {
+    const registry = new GuicosViewsRegistry([], [{ id: 'a', path: 'a' }], { load: () => assert.fail(), preload: () => assert.fail() });
+    const gui = new GuicosGui(new Node(), new GuicosHierarchy(screen('root', GuicosScreen)), registry, new GuicosWidgetsRegistry([], []));
+    await gui.start({}); const background = gui.startBackgroundPreload(undefined, { mode: 'downloadOnly' });
+    await gui.dispose(); await background;
+});
+
+test('progressive warm item timeout invalidates its resource preloader scope', { timeout: 2000 }, async () => {
+    const late = deferred(); let scope;
+    class View extends GuicosView { static async preloadResources(context) { scope = context.scope; await late.promise; } }
+    const f = fixture(GuicosScreen, [slot('view', [view('view', View)])], [{ id: 'view', prefab: prefabFor(View) }]);
+    // This test intentionally uses the legacy hierarchy participation flags.
+    const hierarchy = new GuicosHierarchy(screen('root', GuicosScreen, [slot('view', [view('view', View)])]));
+    const gui = new GuicosGui(new Node(), hierarchy, f.views, f.widgets); await gui.start({});
+    const preload = gui.startBackgroundPreload(undefined, { mode: 'warm', delayBetweenMs: 0, itemTimeoutMs: 10 }); flush();
+    await preload; assert.equal(scope.isActive, false); late.resolve(); await tick(); await gui.dispose();
 });
 
 test('releaseUnused protects shared live instances until deferred destruction', async () => {

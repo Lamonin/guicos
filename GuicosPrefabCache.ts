@@ -1,4 +1,5 @@
 import { director, Director, isValid, Node, Prefab } from "cc";
+import { GuicosLoadOperation, GuicosSharedRequest } from "./GuicosCancellation";
 import { GUICOS_NOOP_LOGGER, IGuicosLogger } from "./GuicosLogger";
 
 export interface GuicosRegistryOptions {
@@ -19,8 +20,8 @@ export function afterGuicosNodeDestruction(operation: () => void, node?: Node): 
 
 /** One owned reference per cached id; concurrent readers share both IO and ownership. */
 export class GuicosPrefabCache {
-    private readonly entries = new Map<string, { prefab: Prefab; users: number }>();
-    private readonly pending = new Map<string, Promise<Prefab>>();
+    private readonly entries = new Map<string, { prefab: Prefab; users: number; generation: object; observed: boolean }>();
+    private readonly pending = new Map<string, GuicosSharedRequest<Prefab>>();
     private disposed = false;
     private disposeScheduled = false;
 
@@ -29,30 +30,41 @@ export class GuicosPrefabCache {
         private readonly logger: IGuicosLogger = GUICOS_NOOP_LOGGER,
     ) { }
 
-    public async get(id: string, load: () => Promise<Prefab>): Promise<Prefab> {
+    public async get(id: string, load: () => Promise<Prefab>, operation?: GuicosLoadOperation): Promise<Prefab> {
         this.assertActive();
+        operation?.throwIfCanceled();
         const entry = this.entries.get(id);
         if (entry !== undefined) {
             if (!isValid(entry.prefab, true)) throw new Error(`Prefab was destroyed outside Guicos ownership: ${id}`);
+            entry.observed = true;
             return entry.prefab;
         }
-        const pending = this.pending.get(id);
-        if (pending !== undefined) return pending;
-        const promise = (async () => {
-            const prefab = await load();
-            // Even a late result must take and relinquish our own reference. Never
-            // release the resource manager's or another registry's ownership.
-            prefab.addRef();
-            if (this.disposed) {
-                this.release(id, prefab);
-                throw new Error("Guicos registry is disposed");
-            }
-            this.entries.set(id, { prefab, users: 0 });
-            return prefab;
-        })();
-        this.pending.set(id, promise);
-        try { return await promise; }
-        finally { this.pending.delete(id); }
+        let pending = this.pending.get(id);
+        if (pending === undefined) {
+            const generation = {};
+            const request = new GuicosSharedRequest<Prefab>(async requestOperation => {
+                const prefab = await load();
+                prefab.addRef();
+                if (this.disposed || requestOperation.isCanceled) {
+                    this.release(id, prefab);
+                    if (this.disposed) throw new Error("Guicos registry is disposed");
+                    requestOperation.throwIfCanceled();
+                }
+                this.entries.set(id, { prefab, users: 0, generation, observed: false });
+                return prefab;
+            }, () => { if (this.pending.get(id) === request) this.pending.delete(id); }, prefab => {
+                // Transport completion and observer delivery are different microtasks.
+                // Aborting between them must not leave an unused owned cache entry.
+                const entry = this.entries.get(id);
+                if (entry?.generation === generation && entry.users === 0 && !entry.observed) {
+                    this.entries.delete(id);
+                    this.release(id, prefab);
+                }
+            });
+            this.pending.set(id, request);
+            pending = request;
+        }
+        return pending.read(operation);
     }
 
     public acquire(id: string): void {
@@ -79,7 +91,11 @@ export class GuicosPrefabCache {
         }
     }
 
-    public stopLoading(): void { this.disposed = true; }
+    public stopLoading(): void {
+        this.disposed = true;
+        // Wake registry observers now; the transport can still complete later.
+        for (const request of Array.from(this.pending.values())) request.cancel(new Error("Guicos registry is disposed"));
+    }
 
     public dispose(): void {
         this.stopLoading();

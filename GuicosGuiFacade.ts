@@ -1,3 +1,4 @@
+import { GuicosNavigationOptions } from "./GuicosCancellation";
 import { GuicosGui } from "./GuicosGui";
 import { GuicosEvent } from "./GuicosEvent";
 import { GuicosId } from "./GuicosId";
@@ -12,9 +13,9 @@ export interface GuicosEventPublishOptions {
 export interface IGuicosGuiFacade {
     readonly widgets: GuicosWidgetsRegistry;
     readonly logger: IGuicosLogger;
-    openScreen<TContext>(screenId: GuicosId, contextOverride?: TContext): Promise<void>;
+    openScreen<TContext>(screenId: GuicosId, contextOverride?: TContext, options?: GuicosNavigationOptions): Promise<void>;
     closeScreen(screenId: GuicosId): Promise<void>;
-    openView<TContext>(viewId: GuicosId, contextOverride?: TContext): Promise<void>;
+    openView<TContext>(viewId: GuicosId, contextOverride?: TContext, options?: GuicosNavigationOptions): Promise<void>;
     closeView(viewId: GuicosId): Promise<void>;
     publishEvent<TEvent extends GuicosEvent>(event: TEvent, options?: GuicosEventPublishOptions): Promise<boolean>;
 }
@@ -38,16 +39,16 @@ export class GuicosGuiFacade implements IGuicosGuiFacade {
         return this.guicosLogger;
     }
 
-    public async openScreen<TContext>(screenId: GuicosId, contextOverride?: TContext): Promise<void> {
-        await this.runtime.openScreenFrom(this.ownerScreenId, screenId, contextOverride, this.transitionToken);
+    public async openScreen<TContext>(screenId: GuicosId, contextOverride?: TContext, options?: GuicosNavigationOptions): Promise<void> {
+        await this.runtime.openScreenFrom(this.ownerScreenId, screenId, contextOverride, options, this.transitionToken);
     }
 
     public async closeScreen(screenId: GuicosId): Promise<void> {
         await this.runtime.closeScreenFrom(this.ownerScreenId, screenId, this.transitionToken);
     }
 
-    public async openView<TContext>(viewId: GuicosId, contextOverride?: TContext): Promise<void> {
-        await this.runtime.openViewFrom(this.ownerScreenId, viewId, contextOverride, this.transitionToken);
+    public async openView<TContext>(viewId: GuicosId, contextOverride?: TContext, options?: GuicosNavigationOptions): Promise<void> {
+        await this.runtime.openViewFrom(this.ownerScreenId, viewId, contextOverride, options, this.transitionToken);
     }
 
     public async closeView(viewId: GuicosId): Promise<void> {
